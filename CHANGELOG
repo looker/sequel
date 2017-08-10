@@ -1,3 +1,7 @@
+=== master
+
+* Don't use savepoints when creating indexes inside a transaction on databases that don't support transactional schema modifications (jeremyevans) (#1407)
+
 === 4.49.0 (2017-08-01)
 
 * Make dataset_associations plugin automatically alias tables when using many_through_many associations that join the same table multiple times (jeremyevans)
