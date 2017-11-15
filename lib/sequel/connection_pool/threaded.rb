@@ -110,7 +110,7 @@ class Sequel::ThreadedConnectionPool < Sequel::ConnectionPool
         oconn = conn
         conn = nil
         disconnect_connection(oconn) if oconn
-        @allocated.delete(t)
+        sync { @allocated.delete(t) }
       end
       raise
     ensure
