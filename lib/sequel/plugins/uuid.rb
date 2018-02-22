@@ -8,8 +8,8 @@
 # in this version.
 #
 # Modifications that have been made to support this version are:
-#   * Changed set_column_value, which is not defined in this version, to send
-#   * Change _before_validation to before_validation
+#   * Use `send` instead of set_column_value (which is part of a future version)
+#   * Change `before_validation` instead of `_before_validation` (also comes in in the future)
 #
 # - Jim < jim@looker.com >
 ##
@@ -20,10 +20,7 @@ require 'securerandom'
 module Sequel
   module Plugins
     # The uuid plugin creates hooks that automatically create a uuid for every
-    # instance.  Note that this uses SecureRandom.uuid to create UUIDs, and
-    # that method is not defined on ruby 1.8.7.  If you would like to use this
-    # on ruby 1.8.7, you need to override the Model#create_uuid private method
-    # to return a valid uuid.
+    # instance.
     #
     # Usage:
     #
@@ -68,8 +65,7 @@ module Sequel
         end
 
         # Create a new UUID.  This method can be overridden to use a separate
-        # method for creating UUIDs.  Note that this method does not work on
-        # ruby 1.8.7, you will have to override it if you are using ruby 1.8.7.
+        # method for creating UUIDs.
         def create_uuid
           SecureRandom.uuid
         end
