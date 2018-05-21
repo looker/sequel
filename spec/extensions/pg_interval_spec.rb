@@ -1,13 +1,18 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 begin
   require 'active_support/duration'
-rescue LoadError => exc
-  skip_warn "pg_interval plugin: can't load active_support/duration (#{exc.class}: #{exc})"
+  begin
+    require 'active_support/gem_version'
+  rescue LoadError
+  end
+rescue LoadError
+  warn "Skipping test of pg_interval plugin: can't load active_support/duration"
 else
 describe "pg_interval extension" do
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:pg_array, :pg_interval)
   end
 
@@ -15,12 +20,28 @@ describe "pg_interval extension" do
     @db.literal(ActiveSupport::Duration.new(0, [])).must_equal "'0'::interval"
     @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 0]])).must_equal "'0'::interval"
     @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 10], [:minutes, 20], [:days, 3], [:months, 4], [:years, 6]])).must_equal "'6 years 4 months 3 days 20 minutes 10 seconds '::interval"
+    @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 10], [:minutes, 20], [:hours, 8], [:days, 3], [:weeks, 2], [:months, 4], [:years, 6]])).must_equal "'6 years 4 months 2 weeks 3 days 8 hours 20 minutes 10 seconds '::interval"
     @db.literal(ActiveSupport::Duration.new(0, [[:seconds, -10.000001], [:minutes, -20], [:days, -3], [:months, -4], [:years, -6]])).must_equal "'-6 years -4 months -3 days -20 minutes -10.000001 seconds '::interval"
   end
 
   it "should literalize ActiveSupport::Duration instances with repeated parts correctly" do
-    @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1]])).must_equal "'3 seconds '::interval"
-    @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1], [:days, 1], [:days, 4]])).must_equal "'5 days 3 seconds '::interval"
+    if defined?(ActiveSupport::VERSION::STRING) && ActiveSupport::VERSION::STRING >= '5.1'
+      @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1]])).must_equal "'1 seconds '::interval"
+      @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1], [:days, 1], [:days, 4]])).must_equal "'4 days 1 seconds '::interval"
+    else
+      @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1]])).must_equal "'3 seconds '::interval"
+      @db.literal(ActiveSupport::Duration.new(0, [[:seconds, 2], [:seconds, 1], [:days, 1], [:days, 4]])).must_equal "'5 days 3 seconds '::interval"
+    end
+  end
+
+  it "should set up conversion procs correctly" do
+    cp = @db.conversion_procs
+    cp[1186].call("1 sec").must_equal ActiveSupport::Duration.new(1, [[:seconds, 1]])
+  end
+
+  it "should set up conversion procs for arrays correctly" do
+    cp = @db.conversion_procs
+    cp[1187].call("{1 sec}").must_equal [ActiveSupport::Duration.new(1, [[:seconds, 1]])]
   end
 
   it "should not affect literalization of custom objects" do
@@ -43,6 +64,12 @@ describe "pg_interval extension" do
   it "should parse interval type from the schema correctly" do
     @db.fetch = [{:name=>'id', :db_type=>'integer'}, {:name=>'i', :db_type=>'interval'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:integer, :interval]
+  end
+
+  it "should set :ruby_default schema entries if default value is recognized" do
+    @db.fetch = [{:name=>'id', :db_type=>'integer', :default=>'1'}, {:name=>'t', :db_type=>'interval', :default=>"'3 days'::interval"}]
+    s = @db.schema(:items)
+    s[1][1][:ruby_default].must_equal ActiveSupport::Duration.new(3*86400, :days=>3)
   end
 
   it "should support typecasting for the interval type" do

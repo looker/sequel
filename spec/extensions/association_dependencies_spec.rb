@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "AssociationDependencies plugin" do
   before do
@@ -6,9 +6,9 @@ describe "AssociationDependencies plugin" do
     @c = Class.new(Sequel::Model)
     @c.plugin :association_dependencies
     @Artist = Class.new(@c).set_dataset(:artists)
-    @Artist.dataset._fetch = {:id=>2, :name=>'Ar'}
+    @Artist.dataset = @Artist.dataset.with_fetch(:id=>2, :name=>'Ar')
     @Album = Class.new(@c).set_dataset(:albums)
-    @Album.dataset._fetch = {:id=>1, :name=>'Al', :artist_id=>2}
+    @Album.dataset = @Album.dataset.with_fetch(:id=>1, :name=>'Al', :artist_id=>2)
     @Artist.columns :id, :name
     @Album.columns :id, :name, :artist_id
     @Artist.one_to_many :albums, :class=>@Album, :key=>:artist_id
@@ -70,6 +70,14 @@ describe "AssociationDependencies plugin" do
     @Artist.add_association_dependencies :other_artists=>:nullify
     @Artist.load(:id=>2, :name=>'Ar').destroy
     DB.sqls.must_equal ['DELETE FROM aoa WHERE (l = 2)', 'DELETE FROM artists WHERE id = 2']
+  end
+
+  it "should not allow modifications if class is frozen" do
+    @Artist.add_association_dependencies :other_artists=>:nullify
+    @Artist.freeze
+    proc{@Artist.add_association_dependencies :albums=>:nullify}.must_raise RuntimeError, TypeError
+    @Artist.association_dependencies.frozen?.must_equal true
+    @Artist.association_dependencies[:before_nullify].frozen?.must_equal true
   end
 
   it "should raise an error if attempting to nullify a many_to_one association" do

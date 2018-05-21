@@ -12,30 +12,31 @@ module Sequel
     # in the extension).
     EXTENSIONS = {}
 
-    # The dataset options that require the removal of cached columns
-    # if changed.
+    EMPTY_ARRAY = [].freeze
+
+    # The dataset options that require the removal of cached columns if changed.
     COLUMN_CHANGE_OPTS = [:select, :sql, :from, :join].freeze
 
     # Which options don't affect the SQL generation.  Used by simple_select_all?
     # to determine if this is a simple SELECT * FROM table.
-    NON_SQL_OPTIONS = [:server, :defaults, :overrides, :graph, :eager, :eager_graph, :graph_aliases]
+    NON_SQL_OPTIONS = [:server, :graph, :row_proc, :quote_identifiers, :skip_symbol_cache].freeze
     
     # These symbols have _join methods created (e.g. inner_join) that
     # call join_table with the symbol, passing along the arguments and
     # block from the method call.
-    CONDITIONED_JOIN_TYPES = [:inner, :full_outer, :right_outer, :left_outer, :full, :right, :left]
+    CONDITIONED_JOIN_TYPES = [:inner, :full_outer, :right_outer, :left_outer, :full, :right, :left].freeze
 
     # These symbols have _join methods created (e.g. natural_join).
     # They accept a table argument and options hash which is passed to join_table,
     # and they raise an error if called with a block.
-    UNCONDITIONED_JOIN_TYPES = [:natural, :natural_left, :natural_right, :natural_full, :cross]
+    UNCONDITIONED_JOIN_TYPES = [:natural, :natural_left, :natural_right, :natural_full, :cross].freeze
     
     # All methods that return modified datasets with a joined table added.
-    JOIN_METHODS = (CONDITIONED_JOIN_TYPES + UNCONDITIONED_JOIN_TYPES).map{|x| "#{x}_join".to_sym} + [:join, :join_table]
+    JOIN_METHODS = ((CONDITIONED_JOIN_TYPES + UNCONDITIONED_JOIN_TYPES).map{|x| "#{x}_join".to_sym} + [:join, :join_table]).freeze
     
     # Methods that return modified datasets
-    QUERY_METHODS = (<<-METHS).split.map(&:to_sym) + JOIN_METHODS
-      add_graph_aliases and distinct except exclude exclude_having exclude_where
+    QUERY_METHODS = ((<<-METHS).split.map(&:to_sym) + JOIN_METHODS).freeze
+      add_graph_aliases distinct except exclude exclude_having
       filter for_update from from_self graph grep group group_and_count group_append group_by having intersect invert
       limit lock_style naked offset or order order_append order_by order_more order_prepend qualify
       reverse reverse_order select select_all select_append select_group select_more server
@@ -64,24 +65,42 @@ module Sequel
       Sequel.synchronize{EXTENSIONS[ext] = block}
     end
 
-    # Alias for where.
-    def and(*cond, &block)
-      where(*cond, &block)
-    end
-    
-    # Returns a new clone of the dataset with the given options merged.
-    # If the options changed include options in COLUMN_CHANGE_OPTS, the cached
-    # columns are deleted.  This method should generally not be called
-    # directly by user code.
-    def clone(opts = nil)
-      c = super()
-      if opts
-        c.instance_variable_set(:@opts, Hash[@opts].merge!(opts))
-        c.instance_variable_set(:@columns, nil) if @columns && !opts.each_key{|o| break if COLUMN_CHANGE_OPTS.include?(o)}
-      else
-        c.instance_variable_set(:@opts, Hash[@opts])
+    # On Ruby 2.4+, use clone(:freeze=>false) to create clones, because
+    # we use true freezing in that case, and we need to modify the opts
+    # in the frozen copy.
+    #
+    # On Ruby <2.4, just use Object#clone directly, since we don't
+    # use true freezing as it isn't possible.
+    if TRUE_FREEZE
+      # Save original clone implementation, as some other methods need
+      # to call it internally.
+      alias _clone clone
+      private :_clone
+
+      # Returns a new clone of the dataset with the given options merged.
+      # If the options changed include options in COLUMN_CHANGE_OPTS, the cached
+      # columns are deleted.  This method should generally not be called
+      # directly by user code.
+      def clone(opts = (return self; nil))
+        c = super(:freeze=>false)
+        c.opts.merge!(opts)
+        unless opts.each_key{|o| break if COLUMN_CHANGE_OPTS.include?(o)}
+          c.clear_columns_cache
+        end
+        c.freeze
       end
-      c
+    else
+      # :nocov:
+      def clone(opts = OPTS) # :nodoc:
+        c = super()
+        c.opts.merge!(opts)
+        unless opts.each_key{|o| break if COLUMN_CHANGE_OPTS.include?(o)}
+          c.clear_columns_cache
+        end
+        c.opts.freeze
+        c
+      end
+      # :nocov:
     end
 
     # Returns a copy of the dataset with the SQL DISTINCT clause. The DISTINCT
@@ -96,8 +115,12 @@ module Sequel
     #  DB[:items].order(:id).distinct{func(:id)} # SQL: SELECT DISTINCT ON (func(id)) * FROM items ORDER BY id
     def distinct(*args, &block)
       virtual_row_columns(args, block)
-      raise(InvalidOperation, "DISTINCT ON not supported") if !args.empty? && !supports_distinct_on?
-      clone(:distinct => args)
+      if args.empty?
+        cached_dataset(:_distinct_ds){clone(:distinct => EMPTY_ARRAY)}
+      else
+        raise(InvalidOperation, "DISTINCT ON not supported") unless supports_distinct_on?
+        clone(:distinct => args.freeze)
+      end
     end
 
     # Adds an EXCEPT clause using a second dataset object.
@@ -112,10 +135,10 @@ module Sequel
     #   DB[:items].except(DB[:other_items])
     #   # SELECT * FROM (SELECT * FROM items EXCEPT SELECT * FROM other_items) AS t1
     #
-    #   DB[:items].except(DB[:other_items], :all=>true, :from_self=>false)
+    #   DB[:items].except(DB[:other_items], all: true, from_self: false)
     #   # SELECT * FROM items EXCEPT ALL SELECT * FROM other_items
     #
-    #   DB[:items].except(DB[:other_items], :alias=>:i)
+    #   DB[:items].except(DB[:other_items], alias: :i)
     #   # SELECT * FROM (SELECT * FROM items EXCEPT SELECT * FROM other_items) AS i
     def except(dataset, opts=OPTS)
       raise(InvalidOperation, "EXCEPT not supported") unless supports_intersect_except?
@@ -126,31 +149,59 @@ module Sequel
     # Performs the inverse of Dataset#where.  Note that if you have multiple filter
     # conditions, this is not the same as a negation of all conditions.
     #
-    #   DB[:items].exclude(:category => 'software')
+    #   DB[:items].exclude(category: 'software')
     #   # SELECT * FROM items WHERE (category != 'software')
     #   
-    #   DB[:items].exclude(:category => 'software', :id=>3)
+    #   DB[:items].exclude(category: 'software', id: 3)
     #   # SELECT * FROM items WHERE ((category != 'software') OR (id != 3))
+    #
+    # Also note that SQL uses 3-valued boolean logic (+true+, +false+, +NULL+), so
+    # the inverse of a true condition is a false condition, and will still
+    # not match rows that were NULL originally.  If you take the earlier
+    # example:
+    #
+    #   DB[:items].exclude(category: 'software')
+    #   # SELECT * FROM items WHERE (category != 'software')
+    #
+    # Note that this does not match rows where +category+ is +NULL+.  This
+    # is because +NULL+ is an unknown value, and you do not know whether
+    # or not the +NULL+ category is +software+.  You can explicitly
+    # specify how to handle +NULL+ values if you want:
+    #
+    #   DB[:items].exclude(Sequel.~(category: nil) & {category: 'software'})
+    #   # SELECT * FROM items WHERE ((category IS NULL) OR (category != 'software'))
     def exclude(*cond, &block)
-      _filter_or_exclude(true, :where, *cond, &block)
+      add_filter(:where, cond, true, &block)
     end
 
     # Inverts the given conditions and adds them to the HAVING clause.
     #
     #   DB[:items].select_group(:name).exclude_having{count(name) < 2}
     #   # SELECT name FROM items GROUP BY name HAVING (count(name) >= 2)
+    #
+    # See documentation for exclude for how inversion is handled in regards
+    # to SQL 3-valued boolean logic.
     def exclude_having(*cond, &block)
-      _filter_or_exclude(true, :having, *cond, &block)
+      add_filter(:having, cond, true, &block)
     end
 
-    # Alias for exclude.
-    def exclude_where(*cond, &block)
-      exclude(*cond, &block)
-    end
-
-    # Return a clone of the dataset loaded with the extensions, see #extension!.
-    def extension(*exts)
-      clone.extension!(*exts)
+    if TRUE_FREEZE
+      # Return a clone of the dataset loaded with the given dataset extensions.
+      # If no related extension file exists or the extension does not have
+      # specific support for Dataset objects, an Error will be raised.
+      def extension(*a)
+        c = _clone(:freeze=>false)
+        c.send(:_extension!, a)
+        c.freeze
+      end
+    else
+      # :nocov:
+      def extension(*exts) # :nodoc:
+        c = clone
+        c.send(:_extension!, exts)
+        c
+      end
+      # :nocov:
     end
 
     # Alias for where.
@@ -162,7 +213,7 @@ module Sequel
     #
     #   DB[:table].for_update # SELECT * FROM table FOR UPDATE
     def for_update
-      lock_style(:update)
+      cached_dataset(:_for_update_ds){lock_style(:update)}
     end
 
     # Returns a copy of the dataset with the source changed. If no
@@ -199,14 +250,17 @@ module Sequel
           s
         end
       end
-      o = {:from=>source.empty? ? nil : source}
-      o[:with] = (opts[:with] || []) + ctes if ctes
+      o = {:from=>source.empty? ? nil : source.freeze}
+      o[:with] = ((opts[:with] || EMPTY_ARRAY) + ctes).freeze if ctes
       o[:num_dataset_sources] = table_alias_num if table_alias_num > 0
       clone(o)
     end
 
     # Returns a dataset selecting from the current dataset.
-    # Supplying the :alias option controls the alias of the result.
+    # Options:
+    # :alias :: Controls the alias of the table
+    # :column_aliases :: Also aliases columns, using derived column lists.
+    #                    Only used in conjunction with :alias.
     #
     #   ds = DB[:items].order(:name).select(:id, :name)
     #   # SELECT id,name FROM items ORDER BY name
@@ -214,21 +268,29 @@ module Sequel
     #   ds.from_self
     #   # SELECT * FROM (SELECT id, name FROM items ORDER BY name) AS t1
     #
-    #   ds.from_self(:alias=>:foo)
+    #   ds.from_self(alias: :foo)
     #   # SELECT * FROM (SELECT id, name FROM items ORDER BY name) AS foo
     #
-    #   ds.from_self(:alias=>:foo, :column_aliases=>[:c1, :c2])
+    #   ds.from_self(alias: :foo, column_aliases: [:c1, :c2])
     #   # SELECT * FROM (SELECT id, name FROM items ORDER BY name) AS foo(c1, c2)
     def from_self(opts=OPTS)
       fs = {}
-      @opts.keys.each{|k| fs[k] = nil unless NON_SQL_OPTIONS.include?(k)}
-      clone(fs).from(opts[:alias] ? as(opts[:alias], opts[:column_aliases]) : self)
+      @opts.keys.each{|k| fs[k] = nil unless non_sql_option?(k)}
+      pr = proc do
+        c = clone(fs).from(opts[:alias] ? as(opts[:alias], opts[:column_aliases]) : self)
+        if cols = _columns
+          c.send(:columns=, cols)
+        end
+        c
+      end
+
+      cache ? cached_dataset(:_from_self_ds, &pr) : pr.call
     end
 
     # Match any of the columns to any of the patterns. The terms can be
-    # strings (which use LIKE) or regular expressions (which are only
-    # supported on MySQL and PostgreSQL).  Note that the total number of
-    # pattern matches will be Array(columns).length * Array(terms).length,
+    # strings (which use LIKE) or regular expressions if the database supports that.
+    # Note that the total number of pattern matches will be
+    # Array(columns).length * Array(terms).length,
     # which could cause performance issues.
     #
     # Options (all are boolean):
@@ -249,15 +311,15 @@ module Sequel
     #   # SELECT * FROM items WHERE ((a LIKE '%test%' ESCAPE '\') OR (a LIKE 'foo' ESCAPE '\')
     #   #   OR (b LIKE '%test%' ESCAPE '\') OR (b LIKE 'foo' ESCAPE '\'))
     #
-    #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_patterns=>true)
+    #   dataset.grep([:a, :b], %w'%foo% %bar%', all_patterns: true)
     #   # SELECT * FROM a WHERE (((a LIKE '%foo%' ESCAPE '\') OR (b LIKE '%foo%' ESCAPE '\'))
     #   #   AND ((a LIKE '%bar%' ESCAPE '\') OR (b LIKE '%bar%' ESCAPE '\')))
     #
-    #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_columns=>true)
+    #   dataset.grep([:a, :b], %w'%foo% %bar%', all_columns: true)
     #   # SELECT * FROM a WHERE (((a LIKE '%foo%' ESCAPE '\') OR (a LIKE '%bar%' ESCAPE '\'))
     #   #   AND ((b LIKE '%foo%' ESCAPE '\') OR (b LIKE '%bar%' ESCAPE '\')))
     #
-    #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_patterns=>true, :all_columns=>true)
+    #   dataset.grep([:a, :b], %w'%foo% %bar%', all_patterns: true, all_columns: true)
     #   # SELECT * FROM a WHERE ((a LIKE '%foo%' ESCAPE '\') AND (b LIKE '%foo%' ESCAPE '\')
     #   #   AND (a LIKE '%bar%' ESCAPE '\') AND (b LIKE '%bar%' ESCAPE '\'))
     def grep(columns, patterns, opts=OPTS)
@@ -283,7 +345,7 @@ module Sequel
     #   DB[:items].group{[a, sum(b)]} # SELECT * FROM items GROUP BY a, sum(b)
     def group(*columns, &block)
       virtual_row_columns(columns, block)
-      clone(:group => (columns.compact.empty? ? nil : columns))
+      clone(:group => (columns.compact.empty? ? nil : columns.freeze))
     end
 
     # Alias of group
@@ -305,15 +367,15 @@ module Sequel
     #   # SELECT first_name, last_name, count(*) AS count FROM items GROUP BY first_name, last_name
     #   # => [{:first_name=>'a', :last_name=>'b', :count=>1}, ...]
     #
-    #   DB[:items].group_and_count(:first_name___name).all
+    #   DB[:items].group_and_count(Sequel[:first_name].as(:name)).all
     #   # SELECT first_name AS name, count(*) AS count FROM items GROUP BY first_name
     #   # => [{:name=>'a', :count=>1}, ...]
     #
-    #   DB[:items].group_and_count{substr(first_name, 1, 1).as(initial)}.all
+    #   DB[:items].group_and_count{substr(:first_name, 1, 1).as(:initial)}.all
     #   # SELECT substr(first_name, 1, 1) AS initial, count(*) AS count FROM items GROUP BY substr(first_name, 1, 1)
     #   # => [{:initial=>'a', :count=>1}, ...]
     def group_and_count(*columns, &block)
-      select_group(*columns, &block).select_more(COUNT_OF_ALL_AS_COUNT)
+      select_group(*columns, &block).select_append(COUNT_OF_ALL_AS_COUNT)
     end
 
     # Returns a copy of the dataset with the given columns added to the list of
@@ -347,10 +409,10 @@ module Sequel
 
     # Returns a copy of the dataset with the HAVING conditions changed. See #where for argument types.
     #
-    #   DB[:items].group(:sum).having(:sum=>10)
+    #   DB[:items].group(:sum).having(sum: 10)
     #   # SELECT * FROM items GROUP BY sum HAVING (sum = 10)
     def having(*cond, &block)
-      _filter(:having, *cond, &block)
+      add_filter(:having, cond, &block)
     end
     
     # Adds an INTERSECT clause using a second dataset object.
@@ -365,10 +427,10 @@ module Sequel
     #   DB[:items].intersect(DB[:other_items])
     #   # SELECT * FROM (SELECT * FROM items INTERSECT SELECT * FROM other_items) AS t1
     #
-    #   DB[:items].intersect(DB[:other_items], :all=>true, :from_self=>false)
+    #   DB[:items].intersect(DB[:other_items], all: true, from_self: false)
     #   # SELECT * FROM items INTERSECT ALL SELECT * FROM other_items
     #
-    #   DB[:items].intersect(DB[:other_items], :alias=>:i)
+    #   DB[:items].intersect(DB[:other_items], alias: :i)
     #   # SELECT * FROM (SELECT * FROM items INTERSECT SELECT * FROM other_items) AS i
     def intersect(dataset, opts=OPTS)
       raise(InvalidOperation, "INTERSECT not supported") unless supports_intersect_except?
@@ -379,20 +441,25 @@ module Sequel
     # Inverts the current WHERE and HAVING clauses.  If there is neither a
     # WHERE or HAVING clause, adds a WHERE clause that is always false.
     #
-    #   DB[:items].where(:category => 'software').invert
+    #   DB[:items].where(category: 'software').invert
     #   # SELECT * FROM items WHERE (category != 'software')
     #
-    #   DB[:items].where(:category => 'software', :id=>3).invert
+    #   DB[:items].where(category: 'software', id: 3).invert
     #   # SELECT * FROM items WHERE ((category != 'software') OR (id != 3))
+    #
+    # See documentation for exclude for how inversion is handled in regards
+    # to SQL 3-valued boolean logic.
     def invert
-      having, where = @opts.values_at(:having, :where)
-      if having.nil? && where.nil?
-        where(false)
-      else
-        o = {}
-        o[:having] = SQL::BooleanExpression.invert(having) if having
-        o[:where] = SQL::BooleanExpression.invert(where) if where
-        clone(o)
+      cached_dataset(:_invert_ds) do
+        having, where = @opts.values_at(:having, :where)
+        if having.nil? && where.nil?
+          where(false)
+        else
+          o = {}
+          o[:having] = SQL::BooleanExpression.invert(having) if having
+          o[:where] = SQL::BooleanExpression.invert(where) if where
+          clone(o)
+        end
       end
     end
 
@@ -449,10 +516,10 @@ module Sequel
     #   DB[:a].join_table(:cross, :b)
     #   # SELECT * FROM a CROSS JOIN b
     #
-    #   DB[:a].join_table(:inner, DB[:b], :c=>d)
+    #   DB[:a].join_table(:inner, DB[:b], c: d)
     #   # SELECT * FROM a INNER JOIN (SELECT * FROM b) AS t1 ON (t1.c = a.d)
     #
-    #   DB[:a].join_table(:left, :b___c, [:d])
+    #   DB[:a].join_table(:left, Sequel[:b].as(:c), [:d])
     #   # SELECT * FROM a LEFT JOIN b AS c USING (d)
     #
     #   DB[:a].natural_join(:b).join_table(:inner, :c) do |ta, jta, js|
@@ -474,8 +541,6 @@ module Sequel
       end
 
       table_alias = options[:table_alias]
-      last_alias = options[:implicit_qualifier]
-      qualify_type = options[:qualify]
 
       if table.is_a?(SQL::AliasedExpression)
         table_expr = if table_alias
@@ -505,16 +570,17 @@ module Sequel
         raise(Sequel::Error, "can't use a block if providing an array of symbols as expr") if block
         SQL::JoinUsingClause.new(expr, type, table_expr)
       else
-        last_alias ||= @opts[:last_joined_table] || first_source_alias
+        last_alias = options[:implicit_qualifier] || @opts[:last_joined_table] || first_source_alias
+        qualify_type = options[:qualify]
         if Sequel.condition_specifier?(expr)
-          expr = expr.collect do |k, v|
+          expr = expr.map do |k, v|
             qualify_type = default_join_table_qualification if qualify_type.nil?
             case qualify_type
             when false
               nil # Do no qualification
             when :deep
-              k = Sequel::Qualifier.new(self, table_name).transform(k)
-              v = Sequel::Qualifier.new(self, last_alias).transform(v)
+              k = Sequel::Qualifier.new(table_name).transform(k)
+              v = Sequel::Qualifier.new(last_alias).transform(v)
             else
               k = qualified_column_name(k, table_name) if k.is_a?(Symbol)
               v = qualified_column_name(v, last_alias) if v.is_a?(Symbol)
@@ -524,13 +590,13 @@ module Sequel
           expr = SQL::BooleanExpression.from_value_pairs(expr)
         end
         if block
-          expr2 = yield(table_name, last_alias, @opts[:join] || [])
+          expr2 = yield(table_name, last_alias, @opts[:join] || EMPTY_ARRAY)
           expr = expr ? SQL::BooleanExpression.new(:AND, expr, expr2) : expr2
         end
         SQL::JoinOnClause.new(expr, type, table_expr)
       end
 
-      opts = {:join => (@opts[:join] || []) + [join]}
+      opts = {:join => ((@opts[:join] || EMPTY_ARRAY) + [join]).freeze}
       opts[:last_joined_table] = table_name unless options[:reset_implicit_qualifier] == false
       opts[:num_dataset_sources] = table_alias_num if table_alias_num
       clone(opts)
@@ -553,10 +619,10 @@ module Sequel
     # or JOIN clauses, it will surround the subquery with LATERAL to enable it
     # to deal with previous tables in the query:
     #
-    #   DB.from(:a, DB[:b].where(:a__c=>:b__d).lateral)
+    #   DB.from(:a, DB[:b].where(Sequel[:a][:c]=>Sequel[:b][:d]).lateral)
     #   # SELECT * FROM a, LATERAL (SELECT * FROM b WHERE (a.c = b.d))
     def lateral
-      clone(:lateral=>true)
+      cached_dataset(:_lateral_ds){clone(:lateral=>true)}
     end
 
     # If given an integer, the dataset will contain only the first l results.
@@ -605,14 +671,23 @@ module Sequel
     
     # Returns a cloned dataset without a row_proc.
     #
-    #   ds = DB[:items]
-    #   ds.row_proc = proc(&:invert)
+    #   ds = DB[:items].with_row_proc(:invert.to_proc)
     #   ds.all # => [{2=>:id}]
     #   ds.naked.all # => [{:id=>2}]
     def naked
-      ds = clone
-      ds.row_proc = nil
-      ds
+      cached_dataset(:_naked_ds){with_row_proc(nil)}
+    end
+
+    # Returns a copy of the dataset that will raise a DatabaseLockTimeout instead
+    # of waiting for rows that are locked by another transaction
+    #
+    #   DB[:items].for_update.nowait
+    #   # SELECT * FROM items FOR UPDATE NOWAIT
+    def nowait
+      cached_dataset(:_nowait_ds) do
+        raise(Error, 'This dataset does not support raises errors instead of waiting for locked rows') unless supports_nowait?
+        clone(:nowait=>true)
+      end
     end
 
     # Returns a copy of the dataset with a specified order. Can be safely combined with limit.
@@ -628,17 +703,17 @@ module Sequel
       clone(:offset => o)
     end
     
-    # Adds an alternate filter to an existing filter using OR. If no filter 
-    # exists an +Error+ is raised.
+    # Adds an alternate filter to an existing WHERE clause using OR.  If there 
+    # is no WHERE clause, then the default is WHERE true, and OR would be redundant,
+    # so return the dataset in that case.
     #
     #   DB[:items].where(:a).or(:b) # SELECT * FROM items WHERE a OR b
+    #   DB[:items].or(:b) # SELECT * FROM items
     def or(*cond, &block)
-      cond = cond.first if cond.size == 1
-      v = @opts[:where]
-      if v.nil? || (cond.respond_to?(:empty?) && cond.empty? && !block)
-        clone
+      if @opts[:where].nil?
+        self
       else
-        clone(:where => SQL::BooleanExpression.new(:OR, v, filter_expr(cond, &block)))
+        add_filter(:where, cond, false, :OR, &block)
       end
     end
 
@@ -651,19 +726,24 @@ module Sequel
     #   DB[:items].order(:name) # SELECT * FROM items ORDER BY name
     #   DB[:items].order(:a, :b) # SELECT * FROM items ORDER BY a, b
     #   DB[:items].order(Sequel.lit('a + b')) # SELECT * FROM items ORDER BY a + b
-    #   DB[:items].order(:a + :b) # SELECT * FROM items ORDER BY (a + b)
+    #   DB[:items].order(Sequel[:a] + :b) # SELECT * FROM items ORDER BY (a + b)
     #   DB[:items].order(Sequel.desc(:name)) # SELECT * FROM items ORDER BY name DESC
     #   DB[:items].order(Sequel.asc(:name, :nulls=>:last)) # SELECT * FROM items ORDER BY name ASC NULLS LAST
     #   DB[:items].order{sum(name).desc} # SELECT * FROM items ORDER BY sum(name) DESC
     #   DB[:items].order(nil) # SELECT * FROM items
     def order(*columns, &block)
       virtual_row_columns(columns, block)
-      clone(:order => (columns.compact.empty?) ? nil : columns)
+      clone(:order => (columns.compact.empty?) ? nil : columns.freeze)
     end
     
-    # Alias of order_more, for naming consistency with order_prepend.
+    # Returns a copy of the dataset with the order columns added
+    # to the end of the existing order.
+    #
+    #   DB[:items].order(:a).order(:b) # SELECT * FROM items ORDER BY b
+    #   DB[:items].order(:a).order_append(:b) # SELECT * FROM items ORDER BY a, b
     def order_append(*columns, &block)
-      order_more(*columns, &block)
+      columns = @opts[:order] + columns if @opts[:order]
+      order(*columns, &block)
     end
 
     # Alias of order
@@ -671,14 +751,9 @@ module Sequel
       order(*columns, &block)
     end
 
-    # Returns a copy of the dataset with the order columns added
-    # to the end of the existing order.
-    #
-    #   DB[:items].order(:a).order(:b) # SELECT * FROM items ORDER BY b
-    #   DB[:items].order(:a).order_more(:b) # SELECT * FROM items ORDER BY a, b
+    # Alias of order_append.
     def order_more(*columns, &block)
-      columns = @opts[:order] + columns if @opts[:order]
-      order(*columns, &block)
+      order_append(*columns, &block)
     end
     
     # Returns a copy of the dataset with the order columns added
@@ -688,25 +763,30 @@ module Sequel
     #   DB[:items].order(:a).order_prepend(:b) # SELECT * FROM items ORDER BY b, a
     def order_prepend(*columns, &block)
       ds = order(*columns, &block)
-      @opts[:order] ? ds.order_more(*@opts[:order]) : ds
+      @opts[:order] ? ds.order_append(*@opts[:order]) : ds
     end
     
     # Qualify to the given table, or first source if no table is given.
     #
-    #   DB[:items].where(:id=>1).qualify
+    #   DB[:items].where(id: 1).qualify
     #   # SELECT items.* FROM items WHERE (items.id = 1)
     #
-    #   DB[:items].where(:id=>1).qualify(:i)
+    #   DB[:items].where(id: 1).qualify(:i)
     #   # SELECT i.* FROM items WHERE (i.id = 1)
-    def qualify(table=first_source)
+    def qualify(table=(cache=true; first_source))
       o = @opts
-      return clone if o[:sql]
-      h = {}
-      (o.keys & QUALIFY_KEYS).each do |k|
-        h[k] = qualified_expression(o[k], table)
+      return self if o[:sql]
+
+      pr = proc do
+        h = {}
+        (o.keys & QUALIFY_KEYS).each do |k|
+          h[k] = qualified_expression(o[k], table)
+        end
+        h[:select] = [SQL::ColumnAll.new(table)].freeze if !o[:select] || o[:select].empty?
+        clone(h)
       end
-      h[:select] = [SQL::ColumnAll.new(table)] if !o[:select] || o[:select].empty?
-      clone(h)
+
+      cache ? cached_dataset(:_qualify_ds, &pr) : pr.call
     end
 
     # Modify the RETURNING clause, only supported on a few databases.  If returning
@@ -717,9 +797,26 @@ module Sequel
     #   DB[:items].returning # RETURNING *
     #   DB[:items].returning(nil) # RETURNING NULL
     #   DB[:items].returning(:id, :name) # RETURNING id, name
+    #
+    #   DB[:items].returning.insert(:a=>1) do |hash|
+    #     # hash for each row inserted, with values for all columns
+    #   end
+    #   DB[:items].returning.update(:a=>1) do |hash|
+    #     # hash for each row updated, with values for all columns
+    #   end
+    #   DB[:items].returning.delete(:a=>1) do |hash|
+    #     # hash for each row deleted, with values for all columns
+    #   end
     def returning(*values)
-      raise Error, "RETURNING is not supported on #{db.database_type}" unless supports_returning?(:insert)
-      clone(:returning=>values)
+      if values.empty?
+        cached_dataset(:_returning_ds) do
+          raise Error, "RETURNING is not supported on #{db.database_type}" unless supports_returning?(:insert)
+          clone(:returning=>EMPTY_ARRAY)
+        end
+      else
+        raise Error, "RETURNING is not supported on #{db.database_type}" unless supports_returning?(:insert)
+        clone(:returning=>values.freeze)
+      end
     end
 
     # Returns a copy of the dataset with the order reversed. If no order is
@@ -730,8 +827,12 @@ module Sequel
     #   DB[:items].order(:id).reverse # SELECT * FROM items ORDER BY id DESC
     #   DB[:items].order(:id).reverse(Sequel.desc(:name)) # SELECT * FROM items ORDER BY name ASC
     def reverse(*order, &block)
-      virtual_row_columns(order, block)
-      order(*invert_order(order.empty? ? @opts[:order] : order))
+      if order.empty? && !block
+        cached_dataset(:_reverse_ds){order(*invert_order(@opts[:order]))}
+      else
+        virtual_row_columns(order, block)
+        order(*invert_order(order.empty? ? @opts[:order] : order.freeze))
+      end
     end
 
     # Alias of +reverse+
@@ -748,7 +849,7 @@ module Sequel
     #   DB[:items].select{[a, sum(b)]} # SELECT a, sum(b) FROM items
     def select(*columns, &block)
       virtual_row_columns(columns, block)
-      clone(:select => columns)
+      clone(:select => columns.freeze)
     end
     
     # Returns a copy of the dataset selecting the wildcard if no arguments
@@ -760,9 +861,9 @@ module Sequel
     #   DB[:items].select_all(:items, :foo) # SELECT items.*, foo.* FROM items
     def select_all(*tables)
       if tables.empty?
-        clone(:select => nil)
+        cached_dataset(:_select_all_ds){clone(:select => nil)}
       else
-        select(*tables.map{|t| i, a = split_alias(t); a || i}.map{|t| SQL::ColumnAll.new(t)})
+        select(*tables.map{|t| i, a = split_alias(t); a || i}.map!{|t| SQL::ColumnAll.new(t)}.freeze)
       end
     end
     
@@ -777,7 +878,7 @@ module Sequel
       cur_sel = @opts[:select]
       if !cur_sel || cur_sel.empty?
         unless supports_select_all_and_column?
-          return select_all(*(Array(@opts[:from]) + Array(@opts[:join]))).select_more(*columns, &block)
+          return select_all(*(Array(@opts[:from]) + Array(@opts[:join]))).select_append(*columns, &block)
         end
         cur_sel = [WILDCARD]
       end
@@ -791,7 +892,7 @@ module Sequel
     #   DB[:items].select_group(:a, :b)
     #   # SELECT a, b FROM items GROUP BY a, b
     #
-    #   DB[:items].select_group(:c___a){f(c2)}
+    #   DB[:items].select_group(Sequel[:c].as(:a)){f(c2)}
     #   # SELECT c AS a, f(c2) FROM items GROUP BY c, f(c2)
     def select_group(*columns, &block)
       virtual_row_columns(columns, block)
@@ -827,42 +928,35 @@ module Sequel
       end
     end
 
-    # Skip locked rows when returning results from this dataset.
-    def skip_locked
-      raise(Error, 'This dataset does not support skipping locked rows') unless supports_skip_locked?
-      clone(:skip_locked=>true)
+    # Specify that the check for limits/offsets when updating/deleting be skipped for the dataset.
+    def skip_limit_check
+      cached_dataset(:_skip_limit_check_ds) do
+        clone(:skip_limit_check=>true)
+      end
     end
 
-    # Unbind bound variables from this dataset's filter and return an array of two
-    # objects.  The first object is a modified dataset where the filter has been
-    # replaced with one that uses bound variable placeholders.  The second object
-    # is the hash of unbound variables.  You can then prepare and execute (or just
-    # call) the dataset with the bound variables to get results.
-    #
-    #   ds, bv = DB[:items].where(:a=>1).unbind
-    #   ds # SELECT * FROM items WHERE (a = $a)
-    #   bv #  {:a => 1}
-    #   ds.call(:select, bv)
-    def unbind
-      u = Unbinder.new
-      ds = clone(:where=>u.transform(opts[:where]), :join=>u.transform(opts[:join]))
-      [ds, u.binds]
+    # Skip locked rows when returning results from this dataset.
+    def skip_locked
+      cached_dataset(:_skip_locked_ds) do
+        raise(Error, 'This dataset does not support skipping locked rows') unless supports_skip_locked?
+        clone(:skip_locked=>true)
+      end
     end
 
     # Returns a copy of the dataset with no filters (HAVING or WHERE clause) applied.
     # 
-    #   DB[:items].group(:a).having(:a=>1).where(:b).unfiltered
+    #   DB[:items].group(:a).having(a: 1).where(:b).unfiltered
     #   # SELECT * FROM items GROUP BY a
     def unfiltered
-      clone(:where => nil, :having => nil)
+      cached_dataset(:_unfiltered_ds){clone(:where => nil, :having => nil)}
     end
 
     # Returns a copy of the dataset with no grouping (GROUP or HAVING clause) applied.
     # 
-    #   DB[:items].group(:a).having(:a=>1).where(:b).ungrouped
+    #   DB[:items].group(:a).having(a: 1).where(:b).ungrouped
     #   # SELECT * FROM items WHERE b
     def ungrouped
-      clone(:group => nil, :having => nil)
+      cached_dataset(:_ungrouped_ds){clone(:group => nil, :having => nil)}
     end
 
     # Adds a UNION clause using a second dataset object.
@@ -876,10 +970,10 @@ module Sequel
     #   DB[:items].union(DB[:other_items])
     #   # SELECT * FROM (SELECT * FROM items UNION SELECT * FROM other_items) AS t1
     #
-    #   DB[:items].union(DB[:other_items], :all=>true, :from_self=>false)
+    #   DB[:items].union(DB[:other_items], all: true, from_self: false)
     #   # SELECT * FROM items UNION ALL SELECT * FROM other_items
     #
-    #   DB[:items].union(DB[:other_items], :alias=>:i)
+    #   DB[:items].union(DB[:other_items], alias: :i)
     #   # SELECT * FROM (SELECT * FROM items UNION SELECT * FROM other_items) AS i
     def union(dataset, opts=OPTS)
       compound_clone(:union, dataset, opts)
@@ -889,32 +983,24 @@ module Sequel
     # 
     #   DB[:items].limit(10, 20).unlimited # SELECT * FROM items
     def unlimited
-      clone(:limit=>nil, :offset=>nil)
+      cached_dataset(:_unlimited_ds){clone(:limit=>nil, :offset=>nil)}
     end
 
     # Returns a copy of the dataset with no order.
     # 
     #   DB[:items].order(:a).unordered # SELECT * FROM items
     def unordered
-      order(nil)
+      cached_dataset(:_unordered_ds){clone(:order=>nil)}
     end
     
     # Returns a copy of the dataset with the given WHERE conditions imposed upon it.  
     # 
     # Accepts the following argument types:
     #
-    # Hash :: list of equality/inclusion expressions
-    # Array :: depends:
-    #          * If first member is a string, assumes the rest of the arguments
-    #            are parameters and interpolates them into the string.
-    #          * If all members are arrays of length two, treats the same way
-    #            as a hash, except it allows for duplicate keys to be
-    #            specified.
-    #          * Otherwise, treats each argument as a separate condition.
-    # String :: taken literally
+    # Hash, Array of pairs :: list of equality/inclusion expressions
     # Symbol :: taken as a boolean column argument (e.g. WHERE active)
-    # Sequel::SQL::BooleanExpression :: an existing condition expression,
-    #                                   probably created using the Sequel expression filter DSL.
+    # Sequel::SQL::BooleanExpression, Sequel::LiteralString :: an existing condition expression, probably created
+    #                                                          using the Sequel expression filter DSL.
     #
     # where also accepts a block, which should return one of the above argument
     # types, and is treated the same way.  This block yields a virtual row object,
@@ -925,16 +1011,16 @@ module Sequel
     #
     # Examples:
     #
-    #   DB[:items].where(:id => 3)
+    #   DB[:items].where(id: 3)
     #   # SELECT * FROM items WHERE (id = 3)
     #
-    #   DB[:items].where('price < ?', 100)
+    #   DB[:items].where(Sequel.lit('price < ?', 100))
     #   # SELECT * FROM items WHERE price < 100
     #
     #   DB[:items].where([[:id, [1,2,3]], [:id, 0..10]])
     #   # SELECT * FROM items WHERE ((id IN (1, 2, 3)) AND ((id >= 0) AND (id <= 10)))
     #
-    #   DB[:items].where('price < 100')
+    #   DB[:items].where(Sequel.lit('price < 100'))
     #   # SELECT * FROM items WHERE price < 100
     #
     #   DB[:items].where(:active)
@@ -945,12 +1031,12 @@ module Sequel
     # 
     # Multiple where calls can be chained for scoping:
     #
-    #   software = dataset.where(:category => 'software').where{price < 100}
+    #   software = dataset.where(category: 'software').where{price < 100}
     #   # SELECT * FROM items WHERE ((category = 'software') AND (price < 100))
     #
     # See the {"Dataset Filtering" guide}[rdoc-ref:doc/dataset_filtering.rdoc] for more examples and details.
     def where(*cond, &block)
-      _filter(:where, *cond, &block)
+      add_filter(:where, cond, &block)
     end
     
     # Add a common table expression (CTE) with the given name and a dataset that defines the CTE.
@@ -959,7 +1045,7 @@ module Sequel
     # :args :: Specify the arguments/columns for the CTE, should be an array of symbols.
     # :recursive :: Specify that this is a recursive CTE
     #
-    #   DB[:items].with(:items, DB[:syx].where(:name.like('A%')))
+    #   DB[:items].with(:items, DB[:syx].where(Sequel[:name].like('A%')))
     #   # WITH items AS (SELECT * FROM syx WHERE (name LIKE 'A%' ESCAPE '\')) SELECT * FROM items
     def with(name, dataset, opts=OPTS)
       raise(Error, 'This dataset does not support common table expressions') unless supports_cte?
@@ -967,7 +1053,7 @@ module Sequel
         s, ds = hoist_cte(dataset)
         s.with(name, ds, opts)
       else
-        clone(:with=>(@opts[:with]||[]) + [Hash[opts].merge!(:name=>name, :dataset=>dataset)])
+        clone(:with=>((@opts[:with]||EMPTY_ARRAY) + [Hash[opts].merge!(:name=>name, :dataset=>dataset)]).freeze)
       end
     end
 
@@ -978,15 +1064,15 @@ module Sequel
     # :union_all :: Set to false to use UNION instead of UNION ALL combining the nonrecursive and recursive parts.
     #
     #   DB[:t].with_recursive(:t,
-    #     DB[:i1].select(:id, :parent_id).where(:parent_id=>nil),
-    #     DB[:i1].join(:t, :id=>:parent_id).select(:i1__id, :i1__parent_id),
+    #     DB[:i1].select(:id, :parent_id).where(parent_id: nil),
+    #     DB[:i1].join(:t, id: :parent_id).select(Sequel[:i1][:id], Sequel[:i1][:parent_id]),
     #     :args=>[:id, :parent_id])
     #   
-    #   # WITH RECURSIVE "t"("id", "parent_id") AS (
-    #   #   SELECT "id", "parent_id" FROM "i1" WHERE ("parent_id" IS NULL)
+    #   # WITH RECURSIVE t(id, parent_id) AS (
+    #   #   SELECT id, parent_id FROM i1 WHERE (parent_id IS NULL)
     #   #   UNION ALL
-    #   #   SELECT "i1"."id", "i1"."parent_id" FROM "i1" INNER JOIN "t" ON ("t"."id" = "i1"."parent_id")
-    #   # ) SELECT * FROM "t"
+    #   #   SELECT i1.id, i1.parent_id FROM i1 INNER JOIN t ON (t.id = i1.parent_id)
+    #   # ) SELECT * FROM t
     def with_recursive(name, nonrecursive, recursive, opts=OPTS)
       raise(Error, 'This datatset does not support common table expressions') unless supports_cte?
       if hoist_cte?(nonrecursive)
@@ -996,10 +1082,42 @@ module Sequel
         s, ds = hoist_cte(recursive)
         s.with_recursive(name, nonrecursive, ds, opts)
       else
-        clone(:with=>(@opts[:with]||[]) + [Hash[opts].merge!(:recursive=>true, :name=>name, :dataset=>nonrecursive.union(recursive, {:all=>opts[:union_all] != false, :from_self=>false}))])
+        clone(:with=>((@opts[:with]||EMPTY_ARRAY) + [Hash[opts].merge!(:recursive=>true, :name=>name, :dataset=>nonrecursive.union(recursive, {:all=>opts[:union_all] != false, :from_self=>false}))]).freeze)
       end
     end
     
+    if TRUE_FREEZE
+      # Return a clone of the dataset extended with the given modules.
+      # Note that like Object#extend, when multiple modules are provided
+      # as arguments the cloned dataset is extended with the modules in reverse
+      # order.  If a block is provided, a DatasetModule is created using the block and
+      # the clone is extended with that module after any modules given as arguments.
+      def with_extend(*mods, &block)
+        c = _clone(:freeze=>false)
+        c.extend(*mods) unless mods.empty?
+        c.extend(DatasetModule.new(&block)) if block
+        c.freeze
+      end
+    else
+      # :nocov:
+      def with_extend(*mods, &block) # :nodoc:
+        c = clone
+        c.extend(*mods) unless mods.empty?
+        c.extend(DatasetModule.new(&block)) if block
+        c
+      end
+      # :nocov:
+    end
+
+    # Returns a cloned dataset with the given row_proc.
+    #
+    #   ds = DB[:items]
+    #   ds.all # => [{:id=>2}]
+    #   ds.with_row_proc(:invert.to_proc).all # => [{2=>:id}]
+    def with_row_proc(callable)
+      clone(:row_proc=>callable)
+    end
+
     # Returns a copy of the dataset with the static SQL used.  This is useful if you want
     # to keep the same row_proc/graph, but change the SQL used to custom SQL.
     #
@@ -1012,9 +1130,27 @@ module Sequel
     # You can also provide a method name and arguments to call to get the SQL:
     #
     #   DB[:items].with_sql(:insert_sql, :b=>1) # INSERT INTO items (b) VALUES (1)
+    #
+    # Note that datasets that specify custom SQL using this method will generally
+    # ignore future dataset methods that modify the SQL used, as specifying custom SQL
+    # overrides Sequel's SQL generator.  You should probably limit yourself to the following
+    # dataset methods when using this method, or use the implicit_subquery extension:
+    #
+    # * each
+    # * all
+    # * single_record (if only one record could be returned)
+    # * single_value (if only one record could be returned, and a single column is selected)
+    # * map
+    # * as_hash
+    # * to_hash
+    # * to_hash_groups
+    # * delete (if a DELETE statement)
+    # * update (if an UPDATE statement, with no arguments)
+    # * insert (if an INSERT statement, with no arguments)
+    # * truncate (if a TRUNCATE statement, with no arguments)
     def with_sql(sql, *args)
       if sql.is_a?(Symbol)
-        sql = send(sql, *args)
+        sql = public_send(sql, *args)
       else
         sql = SQL::PlaceholderLiteralString.new(sql, args) unless args.empty?
       end
@@ -1025,26 +1161,33 @@ module Sequel
 
     # Add the dataset to the list of compounds
     def compound_clone(type, dataset, opts)
-      if hoist_cte?(dataset)
+      if dataset.is_a?(Dataset) && dataset.opts[:with] && !supports_cte_in_compounds?
         s, ds = hoist_cte(dataset)
         return s.compound_clone(type, ds, opts)
       end
-      ds = compound_from_self.clone(:compounds=>Array(@opts[:compounds]).map(&:dup) + [[type, dataset.compound_from_self, opts[:all]]])
+      ds = compound_from_self.clone(:compounds=>(Array(@opts[:compounds]).map(&:dup) + [[type, dataset.compound_from_self, opts[:all]].freeze]).freeze)
       opts[:from_self] == false ? ds : ds.from_self(opts)
     end
 
     # Return true if the dataset has a non-nil value for any key in opts.
     def options_overlap(opts)
-      !(@opts.collect{|k,v| k unless v.nil?}.compact & opts).empty?
+      !(@opts.map{|k,v| k unless v.nil?}.compact & opts).empty?
     end
+
+    # From types allowed to be considered a simple_select_all
+    SIMPLE_SELECT_ALL_ALLOWED_FROM = [Symbol, SQL::Identifier, SQL::QualifiedIdentifier].freeze
 
     # Whether this dataset is a simple select from an underlying table, such as:
     #
     #   SELECT * FROM table
     #   SELECT table.* FROM table
     def simple_select_all?
-      o = @opts.reject{|k,v| v.nil? || NON_SQL_OPTIONS.include?(k)}
-      if (f = o[:from]) && f.length == 1 && (f.first.is_a?(Symbol) || f.first.is_a?(SQL::AliasedExpression))
+      return false unless (f = @opts[:from]) && f.length == 1
+      o = @opts.reject{|k,v| v.nil? || non_sql_option?(k)}
+      from = f.first
+      from = from.expression if from.is_a?(SQL::AliasedExpression)
+
+      if SIMPLE_SELECT_ALL_ALLOWED_FROM.any?{|x| from.is_a?(x)}
         case o.length
         when 1
           true
@@ -1060,23 +1203,48 @@ module Sequel
 
     private
 
-    # Internal filtering method so it works on either the WHERE or HAVING clauses, with or
-    # without inversion.
-    def _filter_or_exclude(invert, clause, *cond, &block)
-      cond = cond.first if cond.size == 1
-      if cond.respond_to?(:empty?) && cond.empty? && !block
-        clone
-      else
-        cond = filter_expr(cond, &block)
-        cond = SQL::BooleanExpression.invert(cond) if invert
-        cond = SQL::BooleanExpression.new(:AND, @opts[clause], cond) if @opts[clause]
-        clone(clause => cond)
+    # Load the extensions into the receiver, without checking if the receiver is frozen.
+    def _extension!(exts)
+      Sequel.extension(*exts)
+      exts.each do |ext|
+        if pr = Sequel.synchronize{EXTENSIONS[ext]}
+          pr.call(self)
+        else
+          raise(Error, "Extension #{ext} does not have specific support handling individual datasets (try: Sequel.extension #{ext.inspect})")
+        end
       end
+      self
     end
 
-    # Internal filter method so it works on either the having or where clauses.
-    def _filter(clause, *cond, &block)
-      _filter_or_exclude(false, clause, *cond, &block)
+    def add_filter(clause, cond, invert=false, combine=:AND, &block)
+      if cond == EMPTY_ARRAY && !block
+        raise Error, "must provide an argument to a filtering method if not passing a block"
+      end
+      
+      cond = cond.first if cond.size == 1
+
+      empty = cond == OPTS || cond == EMPTY_ARRAY
+
+      if empty && !block
+        self 
+      else
+        if cond == nil
+          cond = Sequel::NULL
+        end
+        if empty && block
+          cond = nil
+        end
+
+        cond = filter_expr(cond, &block)
+        cond = SQL::BooleanExpression.invert(cond) if invert
+        cond = SQL::BooleanExpression.new(combine, @opts[clause], cond) if @opts[clause]
+
+        if cond.nil?
+          cond = Sequel::NULL
+        end
+
+        clone(clause => cond)
+      end
     end
 
     # The default :qualify option to use for join tables if one is not specified.
@@ -1086,29 +1254,27 @@ module Sequel
     
     # SQL expression object based on the expr type.  See +where+.
     def filter_expr(expr = nil, &block)
-      expr = nil if expr == []
+      expr = nil if expr == EMPTY_ARRAY
 
-      if expr && block
-        return SQL::BooleanExpression.new(:AND, filter_expr(expr), filter_expr(block))
-      elsif block
-        expr = block
+      if block
+        cond = filter_expr(Sequel.virtual_row(&block))
+        cond = SQL::BooleanExpression.new(:AND, filter_expr(expr), cond) if expr
+        return cond
       end
 
       case expr
       when Hash
         SQL::BooleanExpression.from_value_pairs(expr)
       when Array
-        if (sexpr = expr.at(0)).is_a?(String)
-          SQL::PlaceholderLiteralString.new(sexpr, expr[1..-1], true)
-        elsif Sequel.condition_specifier?(expr)
+        if Sequel.condition_specifier?(expr)
           SQL::BooleanExpression.from_value_pairs(expr)
         else
-          SQL::BooleanExpression.new(:AND, *expr.map{|x| filter_expr(x)})
+          raise Error, "Invalid filter expression: #{expr.inspect}"
         end
-      when Proc
-        filter_expr(Sequel.virtual_row(&expr))
-      when Numeric, SQL::NumericExpression, SQL::StringExpression
-        raise(Error, "Invalid filter expression: #{expr.inspect}") 
+      when LiteralString
+        LiteralString.new("(#{expr})")
+      when Numeric, SQL::NumericExpression, SQL::StringExpression, Proc, String
+        raise Error, "Invalid filter expression: #{expr.inspect}"
       when TrueClass, FalseClass
         if supports_where_true?
           SQL::BooleanExpression.new(:NOOP, expr)
@@ -1117,10 +1283,10 @@ module Sequel
         else
           SQL::Constants::SQLFALSE
         end
-      when String
-        LiteralString.new("(#{expr})")
       when PlaceholderLiteralizer::Argument
         expr.transform{|v| filter_expr(v)}
+      when SQL::PlaceholderLiteralString
+        expr.with_parens
       else
         expr
       end
@@ -1130,7 +1296,7 @@ module Sequel
     # clause from the given dataset added to it, and the second a clone of
     # the given dataset with the WITH clause removed.
     def hoist_cte(ds)
-      [clone(:with => (opts[:with] || []) + ds.opts[:with]), ds.clone(:with => nil)]
+      [clone(:with => ((opts[:with] || EMPTY_ARRAY) + ds.opts[:with]).freeze), ds.clone(:with => nil)]
     end
 
     # Whether CTEs need to be hoisted from the given ds into the current ds.
@@ -1144,7 +1310,7 @@ module Sequel
     #   DB[:items].invert_order([Sequel.desc(:id)]]) #=> [Sequel.asc(:id)]
     #   DB[:items].invert_order([:category, Sequel.desc(:price)]) #=> [Sequel.desc(:category), Sequel.asc(:price)]
     def invert_order(order)
-      return nil unless order
+      return unless order
       order.map do |f|
         case f
         when SQL::OrderedExpression
@@ -1159,6 +1325,11 @@ module Sequel
     # default server otherwise.
     def default_server
       server?(:default)
+    end
+
+    # Whether the given option key does not affect the generated SQL.
+    def non_sql_option?(key)
+      NON_SQL_OPTIONS.include?(key)
     end
 
     # Treat the +block+ as a virtual_row block if not +nil+ and

@@ -7,11 +7,6 @@ module Sequel
     # These methods don't fit cleanly into another section.
     # ---------------------
     
-    NOTIMPL_MSG = "This method must be overridden in Sequel adapters".freeze
-    ARRAY_ACCESS_ERROR_MSG = 'You cannot call Dataset#[] with an integer or with no arguments.'.freeze
-    ARG_BLOCK_ERROR_MSG = 'Must use either an argument or a block, not both'.freeze
-    IMPORT_ERROR_MSG = 'Using Sequel::Dataset#import an empty column array is not allowed'.freeze
-    
     # The database related to this dataset.  This is the Database instance that
     # will execute all of this dataset's queries.
     attr_reader :db
@@ -30,12 +25,14 @@ module Sequel
     def initialize(db)
       @db = db
       @opts = OPTS
+      @cache = {}
+      freeze
     end
 
-    # Define a hash value such that datasets with the same DB, opts, and SQL
+    # Define a hash value such that datasets with the same class, DB, and opts
     # will be considered equal.
     def ==(o)
-      o.is_a?(self.class) && db == o.db && opts == o.opts && sql == o.sql
+      o.is_a?(self.class) && db == o.db && opts == o.opts
     end
 
     # An object representing the current date or time, should be an instance
@@ -49,18 +46,16 @@ module Sequel
       self == o
     end
 
-    # Similar to #clone, but returns an unfrozen clone if the receiver is frozen.
+    # Return self, as datasets are always frozen.
     def dup
-      o = clone
-      o.instance_variable_set(:@frozen, false) if frozen?
-      o
+      self
     end
     
     # Yield a dataset for each server in the connection pool that is tied to that server.
     # Intended for use in sharded environments where all servers need to be modified
     # with the same data:
     #
-    #   DB[:configs].where(:key=>'setting').each_server{|ds| ds.update(:value=>'new_value')}
+    #   DB[:configs].where(key: 'setting').each_server{|ds| ds.update(value: 'new_value')}
     def each_server
       db.servers.each{|s| yield server(s)}
     end
@@ -74,15 +69,22 @@ module Sequel
       string.gsub(/[\\%_]/){|m| "\\#{m}"}
     end
 
-    # Sets the frozen flag on the dataset, so you can't modify it. Returns the receiver.
-    def freeze
-      @frozen = true
-      self
-    end
+    if TRUE_FREEZE
+      # Freeze the opts when freezing the dataset.
+      def freeze
+        @opts.freeze
+        super
+      end
+    else
+      # :nocov:
+      def freeze # :nodoc:
+        self
+      end
 
-    # Whether the object is frozen.
-    def frozen?
-      @frozen == true
+      def frozen?  # :nodoc:
+        true
+      end
+      # :nocov:
     end
    
     # Alias of +first_source_alias+
@@ -96,7 +98,7 @@ module Sequel
     #   DB[:table].first_source_alias
     #   # => :table
     #
-    #   DB[:table___t].first_source_alias
+    #   DB[Sequel[:table].as(:t)].first_source_alias
     #   # => :t
     def first_source_alias
       source = @opts[:from]
@@ -121,7 +123,7 @@ module Sequel
     #   DB[:table].first_source_table
     #   # => :table
     #
-    #   DB[:table___t].first_source_table
+    #   DB[Sequel[:table].as(:t)].first_source_table
     #   # => :table
     def first_source_table
       source = @opts[:from]
@@ -139,30 +141,10 @@ module Sequel
       end
     end
 
-    # Define a hash value such that datasets with the same DB, opts, and SQL
-    # will have the same hash value
+    # Define a hash value such that datasets with the same class, DB, and opts,
+    # will have the same hash value.
     def hash
-      [db, opts, sql].hash
-    end
-    
-    # The String instance method to call on identifiers before sending them to
-    # the database.
-    def identifier_input_method
-      if defined?(@identifier_input_method)
-        @identifier_input_method
-      else
-        @identifier_input_method = db.identifier_input_method
-      end
-    end
-    
-    # The String instance method to call on identifiers before sending them to
-    # the database.
-    def identifier_output_method
-      if defined?(@identifier_output_method)
-        @identifier_output_method
-      else
-        @identifier_output_method = db.identifier_output_method
-      end
+      [self.class, db, opts].hash
     end
     
     # Returns a string representation of the dataset including the class name 
@@ -182,6 +164,12 @@ module Sequel
       :x_sequel_row_number_x
     end
 
+    # The row_proc for this database, should be any object that responds to +call+ with
+    # a single hash argument and returns the object you want #each to return.
+    def row_proc
+      @opts[:row_proc]
+    end
+    
     # Splits a possible implicit alias in +c+, handling both SQL::AliasedExpressions
     # and Symbols.  Returns an array of two elements, with the first being the
     # main expression, and the second being the alias.
@@ -203,7 +191,7 @@ module Sequel
     # SQL identifier that represents the unqualified column for the given value.
     # The given value should be a Symbol, SQL::Identifier, SQL::QualifiedIdentifier,
     # or SQL::AliasedExpression containing one of those.  In other cases, this
-    # returns nil
+    # returns nil.
     def unqualified_column_for(v)
       unless v.is_a?(String)
         _unqualified_column_for(v)
@@ -248,7 +236,95 @@ module Sequel
       end
     end
 
+    # Return a modified dataset with quote_identifiers set.
+    def with_quote_identifiers(v)
+      clone(:quote_identifiers=>v, :skip_symbol_cache=>true)
+    end
+      
+    protected
+
+    # Access the cache for the current dataset.  Should be used with caution,
+    # as access to the cache is not thread safe without a mutex if other
+    # threads can reference the dataset.  Symbol keys prefixed with an
+    # underscore are reserved for internal use.
+    attr_reader :cache
+
+    # Retreive a value from the dataset's cache in a thread safe manner.
+    def cache_get(k)
+      Sequel.synchronize{@cache[k]}
+    end
+
+    # Set a value in the dataset's cache in a thread safe manner.
+    def cache_set(k, v)
+      Sequel.synchronize{@cache[k] = v}
+    end
+
+    # Clear the columns hash for the current dataset.  This is not a
+    # thread safe operation, so it should only be used if the dataset
+    # could not be used by another thread (such as one that was just
+    # created via clone).
+    def clear_columns_cache
+      @cache.delete(:_columns)
+    end
+
+    # The cached columns for the current dataset.
+    def _columns
+      cache_get(:_columns)
+    end
+
     private
+
+    # Check the cache for the given key, returning the value.
+    # Otherwise, yield to get the dataset and cache the dataset under the given key.
+    def cached_dataset(key)
+      unless ds = cache_get(key)
+        ds = yield
+        cache_set(key, ds)
+      end
+
+      ds
+    end
+
+    # Return a cached placeholder literalizer for the given key if there
+    # is one for this dataset.  If there isn't one, increment the counter
+    # for the number of calls for the key, and if the counter is at least
+    # three, then create a placeholder literalizer by yielding to the block,
+    # and cache it.
+    def cached_placeholder_literalizer(key)
+      if loader = cache_get(key)
+        return loader unless loader.is_a?(Integer)
+        loader += 1
+
+        if loader >= 3
+          loader = Sequel::Dataset::PlaceholderLiteralizer.loader(self){|pl, _| yield pl}
+          cache_set(key, loader)
+        else
+          cache_set(key, loader + 1)
+          loader = nil
+        end
+      elsif cache_sql?
+        cache_set(key, 1)
+      end
+
+      loader
+    end
+
+    # Set the columns for the current dataset.
+    def columns=(v)
+      cache_set(:_columns, v)
+    end
+
+    # Set the db, opts, and cache for the copy of the dataset.
+    def initialize_copy(c)
+      @db = c.db
+      @opts = Hash[c.opts]
+      if cols = c.cache_get(:_columns)
+        @cache = {:_columns=>cols}
+      else
+        @cache = {}
+      end
+    end
+    alias initialize_clone initialize_copy
 
     # Internal recursive version of unqualified_column_for, handling Strings inside
     # of other objects.

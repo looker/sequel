@@ -12,36 +12,35 @@ module Sequel
       end
     end
 
-    # Database and Dataset support for H2 databases accessed via JDBC.
     module H2
-      # Instance methods for H2 Database objects accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Aprimary_key/i.freeze
-      
-        # Commit an existing prepared transaction with the given transaction
-        # identifier string.
         def commit_prepared_transaction(transaction_id, opts=OPTS)
           run("COMMIT TRANSACTION #{transaction_id}", opts)
         end
 
-        # H2 uses the :h2 database type.
         def database_type
           :h2
         end
 
-        # Rollback an existing prepared transaction with the given transaction
-        # identifier string.
+        def freeze
+          h2_version
+          super
+        end
+
+        def h2_version
+          @h2_version ||= get(Sequel.function(:H2VERSION))
+        end
+
         def rollback_prepared_transaction(transaction_id, opts=OPTS)
           run("ROLLBACK TRANSACTION #{transaction_id}", opts)
         end
 
-        # H2 uses an IDENTITY type
+        # H2 uses an IDENTITY type for primary keys
         def serial_primary_key_options
           {:primary_key => true, :type => :identity, :identity=>true}
         end
 
-        # H2 supports CREATE TABLE IF NOT EXISTS syntax.
+        # H2 supports CREATE TABLE IF NOT EXISTS syntax
         def supports_create_table_if_not_exists?
           true
         end
@@ -58,6 +57,11 @@ module Sequel
         
         private
         
+        # H2 does not allow adding primary key constraints to NULLable columns.
+        def can_add_primary_key_constraint_on_nullable_columns?
+          false
+        end
+
         # If the :prepare option is given and we aren't in a savepoint,
         # prepare the transaction for a two-phase commit.
         def commit_transaction(conn, opts=OPTS)
@@ -68,17 +72,27 @@ module Sequel
           end
         end
 
-        # H2 needs to add a primary key column as a constraint
         def alter_table_sql(table, op)
           case op[:op]
           when :add_column
             if (pk = op.delete(:primary_key)) || (ref = op.delete(:table))
+              if pk
+                op[:null] = false
+              end
+
               sqls = [super(table, op)]
-              sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})" if pk && op[:type] != :identity
+
+              if pk && (h2_version >= '1.4' || op[:type] != :identity)
+                # H2 needs to add a primary key column as a constraint in this case
+                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})"
+              end
+
               if ref
                 op[:table] = ref
-                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD FOREIGN KEY (#{quote_identifier(op[:name])}) #{column_references_sql(op)}"
+                constraint_name = op[:foreign_key_constraint_name]
+                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD#{" CONSTRAINT #{quote_identifier(constraint_name)}" if constraint_name} FOREIGN KEY (#{quote_identifier(op[:name])}) #{column_references_sql(op)}"
               end
+
               sqls
             else
               super(table, op)
@@ -137,7 +151,7 @@ module Sequel
         end
         
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
+          /\Aprimary_key/i
         end
 
         # H2 does not support named column constraints.
@@ -145,26 +159,20 @@ module Sequel
           false
         end
 
-        # Use BIGINT IDENTITY for identity columns that use bigint, fixes
-        # the case where primary_key :column, :type=>:Bignum is used.
-        def type_literal_generic_bignum(column)
+        # Use BIGINT IDENTITY for identity columns that use :Bignum type
+        def type_literal_generic_bignum_symbol(column)
           column[:identity] ? 'BIGINT IDENTITY' : super
         end
       end
       
-      # Dataset class for H2 datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        APOS = Dataset::APOS
-        HSTAR = "H*".freeze
         ILIKE_PLACEHOLDER = ["CAST(".freeze, " AS VARCHAR_IGNORECASE)".freeze].freeze
-        TIME_FORMAT = "'%H:%M:%S'".freeze
-        ONLY_OFFSET = " LIMIT -1 OFFSET ".freeze
 
         # Emulate the case insensitive LIKE operator and the bitwise operators.
         def complex_expression_sql_append(sql, op, args)
           case op
           when :ILIKE, :"NOT ILIKE"
-            super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), [SQL::PlaceholderLiteralString.new(ILIKE_PLACEHOLDER, [args.at(0)]), args.at(1)])
+            super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), [SQL::PlaceholderLiteralString.new(ILIKE_PLACEHOLDER, [args[0]]), args[1]])
           when :&, :|, :^, :<<, :>>, :'B~'
             complex_expression_emulate_append(sql, op, args)
           else
@@ -201,12 +209,12 @@ module Sequel
 
         # H2 expects hexadecimal strings for blob values
         def literal_blob_append(sql, v)
-          sql << APOS << v.unpack(HSTAR).first << APOS
+          sql << "'" << v.unpack("H*").first << "'"
         end
         
         # H2 handles fractional seconds in timestamps, but not in times
         def literal_sqltime(v)
-          v.strftime(TIME_FORMAT)
+          v.strftime("'%H:%M:%S'")
         end
 
         # H2 supports multiple rows in INSERT.
@@ -215,7 +223,7 @@ module Sequel
         end
 
         def select_only_offset_sql(sql)
-          sql << ONLY_OFFSET
+          sql << " LIMIT -1 OFFSET "
           literal_append(sql, @opts[:offset])
         end
 

@@ -1,11 +1,9 @@
 # frozen-string-literal: true
 
 require 'sqlanywhere'
-
-Sequel.require %w'shared/sqlanywhere', 'adapters'
+require_relative 'shared/sqlanywhere'
 
 module Sequel
-  # Module for holding all SqlAnywhere-related classes and modules for Sequel.
   module SqlAnywhere
 
     class SQLAnywhereException < StandardError
@@ -19,7 +17,7 @@ module Sequel
       end
     end
 
-    TYPE_TRANSLATOR = tt = Class.new do
+    tt = Class.new do
       def blob(s) ::Sequel::SQL::Blob.new(s) end
       def boolean(s) s.to_i != 0 end
       def date(s) ::Date.strptime(s) end
@@ -37,12 +35,10 @@ module Sequel
     }.each do |k,v|
       k.each{|n| SQLANYWHERE_TYPES[n] = v}
     end
+    SQLANYWHERE_TYPES.freeze
 
-    # Database class for SQLAnywhere databases used with Sequel.
     class Database < Sequel::Database
       include Sequel::SqlAnywhere::DatabaseMethods
-
-      DEFAULT_CONFIG = { :user => 'dba', :password => 'sql' }
 
       attr_accessor :api
 
@@ -74,12 +70,10 @@ module Sequel
         conn
       end
 
-      # Closes given database connection.
       def disconnect_connection(c)
         @api.sqlany_disconnect(c)
       end
 
-      # Returns number of rows affected
       def execute_dui(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           _execute(conn, :rows, sql, opts)
@@ -98,9 +92,13 @@ module Sequel
         end
       end
 
+      def freeze
+        @conversion_procs.freeze
+        super
+      end
+
       private
 
-      LAST_INSERT_ID = 'SELECT @@IDENTITY'.freeze
       def _execute(conn, type, sql, opts)
         unless rs = log_connection_yield(sql, conn){@api.sqlany_execute_direct(conn, sql)}
           result, errstr = @api.sqlany_error(conn)
@@ -113,7 +111,7 @@ module Sequel
         when :rows
           return @api.sqlany_affected_rows(rs)
         when :insert
-          _execute(conn, :select, LAST_INSERT_ID, opts){|r| return @api.sqlany_get_column(r, 0)[1] if r && @api.sqlany_fetch_next(r) == 1}
+          _execute(conn, :select, 'SELECT @@IDENTITY', opts){|r| return @api.sqlany_get_column(r, 0)[1] if r && @api.sqlany_fetch_next(r) == 1}
         end
       ensure
         @api.sqlany_commit(conn) unless in_transaction?
@@ -121,6 +119,7 @@ module Sequel
       end
 
       def adapter_initialize
+        @convert_smallint_to_bool = true
         @conversion_procs = SQLANYWHERE_TYPES.dup
         @conversion_procs[392] = method(:to_application_timestamp_sa)
         @api = SQLAnywhere::SQLAnywhereInterface.new
@@ -128,26 +127,24 @@ module Sequel
         raise LoadError, "Could not initialize SQLAnywhere DBCAPI library" if @api.sqlany_init == 0
       end
 
+      def dataset_class_default
+        Dataset
+      end
+
       def log_connection_execute(conn, sql)
         _execute(conn, nil, sql, OPTS)
       end
     end
 
-    # Dataset class for SqlAnywhere datasets accessed via the native driver.
     class Dataset < Sequel::Dataset
       include Sequel::SqlAnywhere::DatasetMethods
 
-      Database::DatasetClass = self
-
-      # Yield all rows matching this dataset.  If the dataset is set to
-      # split multiple statements, yield arrays of hashes one per statement
-      # instead of yielding results for all statements as hashes.
       def fetch_rows(sql)
         db = @db
         cps = db.conversion_procs
         api = db.api
         execute(sql) do |rs|
-          convert = (convert_smallint_to_bool and db.convert_smallint_to_bool)
+          convert = convert_smallint_to_bool
           col_infos = []
           api.sqlany_num_cols(rs).times do |i|
             _, _, name, _, type = api.sqlany_get_column_info(rs, i)

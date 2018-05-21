@@ -13,7 +13,7 @@ These run each test in its own transaction, the recommended way to test.
   require 'minitest/hooks/default'
   class Minitest::HooksSpec
     def around
-      Sequel::Model.db.transaction(:rollback=>:always, :auto_savepoint=>true){super}
+      DB.transaction(:rollback=>:always, :auto_savepoint=>true){super}
     end
   end
 
@@ -21,7 +21,7 @@ These run each test in its own transaction, the recommended way to test.
 
   class Minitest::Spec
     def run(*args, &block)
-      Sequel::Model.db.transaction(:rollback=>:always, :auto_savepoint=>true){super}
+      DB.transaction(:rollback=>:always, :auto_savepoint=>true){super}
     end
   end
 
@@ -30,7 +30,7 @@ These run each test in its own transaction, the recommended way to test.
   # Use this class as the base class for your tests
   class SequelTestCase < Minitest::Test
     def run(*args, &block)
-      Sequel::Model.db.transaction(:rollback=>:always, :auto_savepoint=>true){super}
+      DB.transaction(:rollback=>:always, :auto_savepoint=>true){super}
     end
   end
 
@@ -46,7 +46,7 @@ These run each test in its own transaction, the recommended way to test.
 
 You can use the Sequel.transaction method to run a transaction on multiple databases, rolling all of them back.  Instead of:
 
-  Sequel::Model.db.transaction(:rollback=>:always)
+  DB.transaction(:rollback=>:always)
 
 Use Sequel.transaction with an array of databases:
 
@@ -66,11 +66,11 @@ Example:
   require 'minitest/hooks/default'
   class Minitest::HooksSpec
     def around
-      Sequel::Model.db.transaction(:rollback=>:always, :savepoint=>true, :auto_savepoint=>true){super}
+      DB.transaction(:rollback=>:always, :savepoint=>true, :auto_savepoint=>true){super}
     end
 
     def around_all
-      Sequel::Model.db.transaction(:rollback=>:always){super}
+      DB.transaction(:rollback=>:always){super}
     end
   end
 
@@ -90,9 +90,9 @@ The order in which you delete/truncate the tables is important if you are using 
 
   describe "some test suite" do
     after do
-      [:table1, :table2].each{|x| Sequel::Model.db.from(x).truncate}
+      [:table1, :table2].each{|x| DB.from(x).truncate}
       # or
-      [:table1, :table2].each{|x| Sequel::Model.db.from(x).delete}
+      [:table1, :table2].each{|x| DB.from(x).delete}
     end
   end
 
@@ -100,9 +100,9 @@ The order in which you delete/truncate the tables is important if you are using 
 
   class SomeTestClass < Minitest::Test
     def teardown
-      [:table1, :table2].each{|x| Sequel::Model.db.from(x).truncate}
+      [:table1, :table2].each{|x| DB.from(x).truncate}
       # or
-      [:table1, :table2].each{|x| Sequel::Model.db.from(x).delete}
+      [:table1, :table2].each{|x| DB.from(x).delete}
     end
   end
 
@@ -156,8 +156,15 @@ SEQUEL_COLUMNS_INTROSPECTION :: Use the columns_introspection extension when run
 SEQUEL_CONNECTION_VALIDATOR :: Use the connection validator extension when running the specs
 SEQUEL_DUPLICATE_COLUMNS_HANDLER :: Use the duplicate columns handler extension with value given when running the specs
 SEQUEL_ERROR_SQL :: Use the error_sql extension when running the specs
-SEQUEL_NO_AUTO_LITERAL_STRINGS :: Use the no_auto_string_literals extension when running the specs
+SEQUEL_INDEX_CACHING :: Use the index_caching extension when running the specs
+SEQUEL_FREEZE_DATABASE :: Freeze the database before running the integration specs
+SEQUEL_IDENTIFIER_MANGLING :: Use the identifier_mangling extension when running the specs
+SEQUEL_INTEGER64 :: Use the integer64 extension when running the adapter or integration specs
+SEQUEL_MODEL_PREPARED_STATEMENTS :: Use the prepared_statements plugin when running the specs
 SEQUEL_NO_CACHE_ASSOCIATIONS :: Don't cache association metadata when running the specs
 SEQUEL_NO_CHECK_SQLS :: Don't check for specific SQL syntax when running the specs
+SEQUEL_CHECK_PENDING :: Try running all specs (note, can cause lockups for some adapters), and raise errors for skipped specs that don't fail
 SEQUEL_NO_PENDING :: Don't skip any specs, try running all specs (note, can cause lockups for some adapters)
-SKIPPED_TEST_WARN :: Warn when skipping any tests because libraries aren't available
+SEQUEL_PG_TIMESTAMPTZ :: Use the pg_timestamptz extension when running the postgres specs
+SEQUEL_SPLIT_SYMBOLS :: Turn on symbol splitting when running the adapter and integration specs
+SEQUEL_SYNCHRONIZE_SQL :: Use the synchronize_sql extension when running the specs

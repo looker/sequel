@@ -1,10 +1,10 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 asd = begin
   require 'active_support/duration'
   true
-rescue LoadError => e
-  skip_warn "date_arithmetic extension (partial): can't load active_support/duration (#{e.class}: #{e})"
+rescue LoadError
+  warn "Skipping some tests of date_arithmetic extension: can't load active_support/duration"
   false
 end
 
@@ -83,24 +83,29 @@ describe "date_arithmetic extension" do
   end
 
   it "should correctly literalize on Postgres" do
-    db = dbf.call(:postgres)
+    db = dbf.call(:postgres).dataset.with_quote_identifiers(false)
     db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS timestamp)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "(CAST(a AS timestamp) + CAST('1 days ' AS interval))"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "(CAST(a AS timestamp) + CAST('1 years 1 months 1 days 1 hours 1 minutes 1 seconds ' AS interval))"
+
+    db.literal(Sequel.date_add(:a, @h0, :cast=>:timestamptz)).must_equal "CAST(a AS timestamptz)"
+    db.literal(Sequel.date_sub(:a, @h0, :cast=>:timestamptz)).must_equal "CAST(a AS timestamptz)"
+    db.literal(Sequel.date_add(:a, @h2, :cast=>:timestamptz)).must_equal "(CAST(a AS timestamptz) + CAST('1 years 1 months 1 days 1 hours 1 minutes 1 seconds ' AS interval))"
   end
 
   it "should correctly literalize on SQLite" do
-    db = dbf.call(:sqlite)
+    db = dbf.call(:sqlite).dataset.with_quote_identifiers(false)
     db.literal(Sequel.date_add(:a, @h0)).must_equal "datetime(a)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "datetime(a, '1 days')"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "datetime(a, '1 years', '1 months', '1 days', '1 hours', '1 minutes', '1 seconds')"
   end
 
   it "should correctly literalize on MySQL" do
-    db = dbf.call(:mysql)
+    db = dbf.call(:mysql).dataset.with_quote_identifiers(false)
     db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS DATETIME)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "DATE_ADD(a, INTERVAL 1 DAY)"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(a, INTERVAL 1 YEAR), INTERVAL 1 MONTH), INTERVAL 1 DAY), INTERVAL 1 HOUR), INTERVAL 1 MINUTE), INTERVAL 1 SECOND)"
+    db.literal(Sequel.date_add(:a, @h0, :cast=>:timestamp)).must_equal "CAST(a AS timestamp)"
   end
 
   it "should correctly literalize on HSQLDB" do
@@ -110,13 +115,17 @@ describe "date_arithmetic extension" do
     db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(CAST(a AS timestamp) AS timestamp)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "DATE_ADD(CAST(a AS timestamp), INTERVAL 1 DAY)"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(CAST(a AS timestamp), INTERVAL 1 YEAR), INTERVAL 1 MONTH), INTERVAL 1 DAY), INTERVAL 1 HOUR), INTERVAL 1 MINUTE), INTERVAL 1 SECOND)"
+
+    db.literal(Sequel.date_add(:a, @h0, :cast=>:datetime)).must_equal "CAST(CAST(a AS datetime) AS datetime)"
+    db.literal(Sequel.date_add(:a, @h2, :cast=>:datetime)).must_equal "DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(DATE_ADD(CAST(a AS datetime), INTERVAL 1 YEAR), INTERVAL 1 MONTH), INTERVAL 1 DAY), INTERVAL 1 HOUR), INTERVAL 1 MINUTE), INTERVAL 1 SECOND)"
   end
 
   it "should correctly literalize on MSSQL" do
-    db = dbf.call(:mssql)
-    db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS datetime)"
-    db.literal(Sequel.date_add(:a, @h1)).must_equal "DATEADD(day, 1, a)"
-    db.literal(Sequel.date_add(:a, @h2)).must_equal "DATEADD(second, 1, DATEADD(minute, 1, DATEADD(hour, 1, DATEADD(day, 1, DATEADD(month, 1, DATEADD(year, 1, a))))))"
+    db = dbf.call(:mssql).dataset.with_quote_identifiers(false)
+    db.literal(Sequel.date_add(:A, @h0)).must_equal "CAST(A AS datetime)"
+    db.literal(Sequel.date_add(:A, @h1)).must_equal "DATEADD(day, 1, A)"
+    db.literal(Sequel.date_add(:A, @h2)).must_equal "DATEADD(second, 1, DATEADD(minute, 1, DATEADD(hour, 1, DATEADD(day, 1, DATEADD(month, 1, DATEADD(year, 1, A))))))"
+    db.literal(Sequel.date_add(:A, @h0, :cast=>:timestamp)).must_equal "CAST(A AS timestamp)"
   end
 
   it "should correctly literalize on H2" do
@@ -126,10 +135,11 @@ describe "date_arithmetic extension" do
     db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS timestamp)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "DATEADD('day', 1, a)"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "DATEADD('second', 1, DATEADD('minute', 1, DATEADD('hour', 1, DATEADD('day', 1, DATEADD('month', 1, DATEADD('year', 1, a))))))"
+    db.literal(Sequel.date_add(:a, @h0, :cast=>:datetime)).must_equal "CAST(a AS datetime)"
   end
 
   it "should correctly literalize on access" do
-    db = dbf.call(:access)
+    db = dbf.call(:access).dataset.with_quote_identifiers(false)
     db.literal(Sequel.date_add(:a, @h0)).must_equal "CDate(a)"
     db.literal(Sequel.date_add(:a, @h1)).must_equal "DATEADD('d', 1, a)"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "DATEADD('s', 1, DATEADD('n', 1, DATEADD('h', 1, DATEADD('d', 1, DATEADD('m', 1, DATEADD('yyyy', 1, a))))))"
@@ -143,20 +153,24 @@ describe "date_arithmetic extension" do
     db.literal(Sequel.date_add(:a, @h1)).must_equal "{fn timestampadd(SQL_TSI_DAY, 1, timestamp(a))}"
     db.literal(Sequel.date_add(:a, @h2)).must_equal "{fn timestampadd(SQL_TSI_SECOND, 1, timestamp({fn timestampadd(SQL_TSI_MINUTE, 1, timestamp({fn timestampadd(SQL_TSI_HOUR, 1, timestamp({fn timestampadd(SQL_TSI_DAY, 1, timestamp({fn timestampadd(SQL_TSI_MONTH, 1, timestamp({fn timestampadd(SQL_TSI_YEAR, 1, timestamp(a))}))}))}))}))}))}"
     db.literal(Sequel.date_add(Date.civil(2012, 11, 12), @h1)).must_equal "{fn timestampadd(SQL_TSI_DAY, 1, timestamp((CAST('2012-11-12' AS varchar(255)) || ' 00:00:00')))}"
+    db.literal(Sequel.date_add(:a, @h0, :cast=>:datetime)).must_equal "CAST(a AS datetime)"
   end
 
   it "should correctly literalize on Oracle" do
-    db = dbf.call(:oracle)
-    db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS timestamp)"
-    db.literal(Sequel.date_add(:a, @h1)).must_equal "(a + INTERVAL '1' DAY)"
-    db.literal(Sequel.date_add(:a, @h2)).must_equal "(a + INTERVAL '1' YEAR + INTERVAL '1' MONTH + INTERVAL '1' DAY + INTERVAL '1' HOUR + INTERVAL '1' MINUTE + INTERVAL '1' SECOND)"
+    db = dbf.call(:oracle).dataset.with_quote_identifiers(false)
+    db.literal(Sequel.date_add(:A, @h0)).must_equal "CAST(A AS timestamp)"
+    db.literal(Sequel.date_add(:A, @h1)).must_equal "(A + INTERVAL '1' DAY)"
+    db.literal(Sequel.date_add(:A, @h2)).must_equal "(A + INTERVAL '1' YEAR + INTERVAL '1' MONTH + INTERVAL '1' DAY + INTERVAL '1' HOUR + INTERVAL '1' MINUTE + INTERVAL '1' SECOND)"
+    db.literal(Sequel.date_add(:A, @h0, :cast=>:datetime)).must_equal "CAST(A AS datetime)"
   end
 
   it "should correctly literalize on DB2" do
     db = dbf.call(:db2)
-    db.literal(Sequel.date_add(:a, @h0)).must_equal "CAST(a AS timestamp)"
-    db.literal(Sequel.date_add(:a, @h1)).must_equal "(CAST(a AS timestamp) + 1 days)"
-    db.literal(Sequel.date_add(:a, @h2)).must_equal "(CAST(a AS timestamp) + 1 years + 1 months + 1 days + 1 hours + 1 minutes + 1 seconds)"
+    db.literal(Sequel.date_add(:A, @h0)).must_equal "CAST(A AS timestamp)"
+    db.literal(Sequel.date_add(:A, @h1)).must_equal "(CAST(A AS timestamp) + 1 days)"
+    db.literal(Sequel.date_add(:A, @h0)).must_equal "CAST(A AS timestamp)"
+    db.literal(Sequel.date_add(:A, @h1, :cast=>:datetime)).must_equal "(CAST(A AS datetime) + 1 days)"
+    db.literal(Sequel.date_add(:A, @h2, :cast=>:datetime)).must_equal "(CAST(A AS datetime) + 1 years + 1 months + 1 days + 1 hours + 1 minutes + 1 seconds)"
   end
 
   it "should raise error if literalizing on an unsupported database" do

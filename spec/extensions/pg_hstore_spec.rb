@@ -1,11 +1,13 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "pg_hstore extension" do
   before do
     Sequel.extension :pg_array, :pg_hstore
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @m = Sequel::Postgres
     @c = @m::HStore
+    @db.fetch = {:oid=>9999, :typname=>'hstore'}
     @db.extension :pg_hstore
   end
 
@@ -30,7 +32,11 @@ describe "pg_hstore extension" do
     @db.literal(Sequel.hstore("c"=>nil)).must_equal '\'"c"=>NULL\'::hstore'
     @db.literal(Sequel.hstore("c"=>'NULL')).must_equal '\'"c"=>"NULL"\'::hstore'
     @db.literal(Sequel.hstore('c'=>'\ "\'=>')).must_equal '\'"c"=>"\\\\ \\"\'\'=>"\'::hstore'
-    ['\'"a"=>"b","c"=>"d"\'::hstore', '\'"c"=>"d","a"=>"b"\'::hstore'].must_include(@db.literal(Sequel.hstore("a"=>"b","c"=>"d")))
+    @db.literal(Sequel.hstore("a"=>"b","c"=>"d")).must_equal '\'"a"=>"b","c"=>"d"\'::hstore'
+  end
+
+  it "should register conversion proc correctly" do
+    @db.conversion_procs[9999].call('"a"=>"b"').must_equal('a'=>'b')
   end
 
   it "should have Sequel.hstore method for creating HStore instances" do
@@ -89,10 +95,8 @@ describe "pg_hstore extension" do
 
     Sequel.hstore('foo'=>'bar', '1'=>'2').values_at(:foo3, :foo, :foo2, 1).must_equal [nil, 'bar', nil, '2']
 
-    if RUBY_VERSION >= '1.9.0'
-      Sequel.hstore('foo'=>'bar').assoc(:foo).must_equal ['foo', 'bar']
-      Sequel.hstore('foo'=>'bar').assoc(:foo2).must_equal nil
-    end
+    Sequel.hstore('foo'=>'bar').assoc(:foo).must_equal ['foo', 'bar']
+    Sequel.hstore('foo'=>'bar').assoc(:foo2).must_be_nil
   end
 
   it "should convert has_value?/value? lookups to string" do
@@ -113,28 +117,26 @@ describe "pg_hstore extension" do
     Sequel.hstore('1'=>'bar').to_hash[1].must_equal 'bar'
   end
 
-  if RUBY_VERSION >= '1.9.0'
-    it "should convert key lookups to string" do
-      Sequel.hstore('foo'=>'bar').key(:bar).must_equal 'foo'
-      Sequel.hstore('foo'=>'bar').key(:bar2).must_equal nil
-    end
+  it "should convert key lookups to string" do
+    Sequel.hstore('foo'=>'bar').key(:bar).must_equal 'foo'
+    Sequel.hstore('foo'=>'bar').key(:bar2).must_be_nil
+  end
 
-    it "should handle nil values in key lookups" do
-      Sequel.hstore('foo'=>'').key('').must_equal 'foo'
-      Sequel.hstore('foo'=>'').key(nil).must_equal nil
-      Sequel.hstore('foo'=>nil).key(nil).must_equal 'foo'
-    end
+  it "should handle nil values in key lookups" do
+    Sequel.hstore('foo'=>'').key('').must_equal 'foo'
+    Sequel.hstore('foo'=>'').key(nil).must_be_nil
+    Sequel.hstore('foo'=>nil).key(nil).must_equal 'foo'
+  end
 
-    it "should convert rassoc lookups to string" do
-      Sequel.hstore('foo'=>'bar').rassoc(:bar).must_equal ['foo', 'bar']
-      Sequel.hstore('foo'=>'bar').rassoc(:bar2).must_equal nil
-    end
+  it "should convert rassoc lookups to string" do
+    Sequel.hstore('foo'=>'bar').rassoc(:bar).must_equal ['foo', 'bar']
+    Sequel.hstore('foo'=>'bar').rassoc(:bar2).must_be_nil
+  end
 
-    it "should handle nil values in rassoc lookups" do
-      Sequel.hstore('foo'=>'').rassoc('').must_equal ['foo', '']
-      Sequel.hstore('foo'=>'').rassoc(nil).must_equal nil
-      Sequel.hstore('foo'=>nil).rassoc(nil).must_equal ['foo', nil]
-    end
+  it "should handle nil values in rassoc lookups" do
+    Sequel.hstore('foo'=>'').rassoc('').must_equal ['foo', '']
+    Sequel.hstore('foo'=>'').rassoc(nil).must_be_nil
+    Sequel.hstore('foo'=>nil).rassoc(nil).must_equal ['foo', nil]
   end
 
   it "should have delete convert key to string" do
@@ -176,12 +178,23 @@ describe "pg_hstore extension" do
     @db.bound_variable_arg(Sequel.hstore('1'=>nil), nil).must_equal '"1"=>NULL'
     @db.bound_variable_arg(Sequel.hstore('1'=>"NULL"), nil).must_equal '"1"=>"NULL"'
     @db.bound_variable_arg(Sequel.hstore('1'=>"'\\ \"=>"), nil).must_equal '"1"=>"\'\\\\ \\"=>"'
-    ['"a"=>"b","c"=>"d"', '"c"=>"d","a"=>"b"'].must_include(@db.bound_variable_arg(Sequel.hstore("a"=>"b","c"=>"d"), nil))
+    @db.bound_variable_arg(Sequel.hstore("a"=>"b","c"=>"d"), nil).must_equal '"a"=>"b","c"=>"d"'
   end
 
   it "should parse hstore type from the schema correctly" do
     @db.fetch = [{:name=>'id', :db_type=>'integer'}, {:name=>'i', :db_type=>'hstore'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:integer, :hstore]
+  end
+
+  it "should set :callable_default schema entries if default value is recognized" do
+    @db.fetch = [{:name=>'id', :db_type=>'integer', :default=>'1'}, {:name=>'t', :db_type=>'hstore', :default=>"''::hstore"}]
+    s = @db.schema(:items)
+    s[0][1][:callable_default].must_be_nil
+    v = s[1][1][:callable_default].call
+    Sequel::Postgres::HStore.===(v).must_equal true
+    @db.literal(v).must_equal "''::hstore"
+    v['a'] = 'b'
+    @db.literal(v).must_equal "'\"a\"=>\"b\"'::hstore"
   end
 
   it "should support typecasting for the hstore type" do

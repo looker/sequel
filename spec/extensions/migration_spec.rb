@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
+require_relative "spec_helper"
 
 Sequel.extension :migration
 
@@ -54,15 +54,15 @@ describe "Migration.apply" do
 
   it "should have default up and down actions that do nothing" do
     m = Class.new(Sequel::Migration)
-    m.apply(@db, :up).must_equal nil
-    m.apply(@db, :down).must_equal nil
+    m.apply(@db, :up).must_be_nil
+    m.apply(@db, :down).must_be_nil
   end
 
   it "should respond to the methods the database responds to" do
     m = Sequel::Migration.new(Sequel.mock)
     m.respond_to?(:foo).must_equal false
     m.respond_to?(:execute).must_equal true
-  end if RUBY_VERSION >= '1.9'
+  end
 end
 
 describe "SimpleMigration#apply" do
@@ -89,8 +89,8 @@ describe "SimpleMigration#apply" do
 
   it "should have default up and down actions that do nothing" do
     m = Sequel.migration{}
-    m.apply(@db, :up).must_equal nil
-    m.apply(@db, :down).must_equal nil
+    m.apply(@db, :up).must_be_nil
+    m.apply(@db, :down).must_be_nil
   end
 end
 
@@ -129,6 +129,7 @@ describe "Reversible Migrations with Sequel.migration{change{}}" do
       alter_table(:b) do
         add_column :d, String
         add_constraint :blah, 'd IS NOT NULL'
+        add_constraint({:name=>:merp}, 'a > 1')
         add_foreign_key :e, :b
         add_foreign_key [:e], :b, :name=>'e_fk'
         add_foreign_key [:e, :a], :b
@@ -154,6 +155,7 @@ describe "Reversible Migrations with Sequel.migration{change{}}" do
       [:alter_table, [
         [:add_column, :d, String],
         [:add_constraint, :blah, "d IS NOT NULL"],
+        [:add_constraint, {:name=>:merp}, "a > 1"],
         [:add_foreign_key, :e, :b],
         [:add_foreign_key, [:e], :b, {:name=>"e_fk"}],
         [:add_foreign_key, [:e, :a], :b],
@@ -182,6 +184,7 @@ describe "Reversible Migrations with Sequel.migration{change{}}" do
         [:drop_foreign_key, [:e, :a]],
         [:drop_foreign_key, [:e], {:name=>"e_fk"}],
         [:drop_foreign_key, :e],
+        [:drop_constraint, :merp],
         [:drop_constraint, :blah],
         [:drop_column, :d]]
       ],
@@ -190,6 +193,16 @@ describe "Reversible Migrations with Sequel.migration{change{}}" do
       [:drop_index, :a, :b],
       [:drop_column, :a, :b],
       [:drop_table, :a, {:foo=>:bar}]]
+  end
+  
+  it "should reverse add_foreign_key with :foreign_key_constraint_name option" do
+    Sequel.migration{change{alter_table(:t){add_foreign_key :b, :c, :foreign_key_constraint_name=>:f}}}.apply(@db, :down)
+    actions = @db.actions
+    actions.must_equal [[:alter_table, [[:drop_foreign_key, :b, {:foreign_key_constraint_name=>:f}]]]]
+    @db.sqls
+    db = Sequel.mock
+    db.alter_table(:t){send(*actions[0][1][0])}
+    db.sqls.must_equal ["ALTER TABLE t DROP CONSTRAINT f", "ALTER TABLE t DROP COLUMN b"]
   end
   
   it "should raise in the down direction if migration uses unsupported method" do
@@ -249,15 +262,13 @@ describe "Sequel::IntegerMigrator" do
       end
       
       def dataset
-        ds = super
-        ds.extend(Module.new do
+        super.with_extend do
           def count; 1; end
           def columns; db.columns_created end
           def insert(h); db.versions.merge!(h); db.run insert_sql(h) end
           def update(h); db.versions.merge!(h); db.run update_sql(h) end
           def fetch_rows(sql); db.execute(sql); yield(db.versions) unless db.versions.empty? end
-        end)
-        ds
+        end
       end
 
       def table_exists?(name)
@@ -314,6 +325,52 @@ describe "Sequel::IntegerMigrator" do
     Sequel::Migrator.run(@db, @dirname, :target=>0, :table=>:si, :column=>:sic)
     @db.table_exists?(:si).must_equal true
     @db.dataset.columns.must_equal [:sic]
+  end
+  
+  it "should support :relative option for running relative migrations" do
+    Sequel::Migrator.run(@db, @dirname, :relative=>2).must_equal 2
+    @db.creates.must_equal [1111, 2222]
+    @db.version.must_equal 2
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [1, 2]
+
+    Sequel::Migrator.run(@db, @dirname, :relative=>-1).must_equal 1
+    @db.drops.must_equal [2222]
+    @db.version.must_equal 1
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [1]
+
+    Sequel::Migrator.run(@db, @dirname, :relative=>2).must_equal 3
+    @db.creates.must_equal [1111, 2222, 2222, 3333]
+    @db.version.must_equal 3
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [2, 3]
+
+    Sequel::Migrator.run(@db, @dirname, :relative=>-3).must_equal 0
+    @db.drops.must_equal [2222, 3333, 2222, 1111]
+    @db.version.must_equal 0
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [2, 1, 0]
+  end
+  
+  it "should handle :relative option beyond the upper and lower limit" do
+    Sequel::Migrator.run(@db, @dirname, :relative=>100).must_equal 3
+    @db.creates.must_equal [1111, 2222, 3333]
+    @db.version.must_equal 3
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [1, 2, 3]
+
+    Sequel::Migrator.run(@db, @dirname, :relative=>-200).must_equal 0
+    @db.drops.must_equal [3333, 2222, 1111]
+    @db.version.must_equal 0
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [2, 1, 0]
+  end
+
+  it "should correctly handle migration target versions beyond the upper and lower limits" do
+    Sequel::Migrator.run(@db, @dirname, :target=>100).must_equal 3
+    @db.creates.must_equal [1111, 2222, 3333]
+    @db.version.must_equal 3
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [1, 2, 3]
+
+    Sequel::Migrator.run(@db, @dirname, :target=>-100).must_equal 0
+    @db.drops.must_equal [3333, 2222, 1111]
+    @db.version.must_equal 0
+    @db.sqls.map{|x| x =~ /\AUPDATE.*(\d+)/ ? $1.to_i : nil}.compact.must_equal [2, 1, 0]
   end
   
   it "should apply migrations correctly in the up direction if no target is given" do
@@ -382,13 +439,13 @@ describe "Sequel::IntegerMigrator" do
   end
 
   it "should use transactions by default if the database supports transactional ddl" do
-    @db.meta_def(:supports_transactional_ddl?){true}
+    def @db.supports_transactional_ddl?; true end
     Sequel::Migrator.apply(@db, "spec/files/transaction_unspecified_migrations")
     @db.sqls.must_equal ["CREATE TABLE schema_info (version integer DEFAULT 0 NOT NULL)", "SELECT 1 AS one FROM schema_info LIMIT 1", "INSERT INTO schema_info (version) VALUES (0)", "SELECT version FROM schema_info LIMIT 1", "BEGIN", "CREATE TABLE sm11111 (smc1 integer)", "UPDATE schema_info SET version = 1", "COMMIT", "BEGIN", "CREATE TABLE sm (smc1 integer)", "UPDATE schema_info SET version = 2", "COMMIT"]
   end
 
   it "should respect transaction use on a per migration basis" do
-    @db.meta_def(:supports_transactional_ddl?){true}
+    def @db.supports_transactional_ddl?; true end
     Sequel::Migrator.apply(@db, "spec/files/transaction_specified_migrations")
     @db.sqls.must_equal ["CREATE TABLE schema_info (version integer DEFAULT 0 NOT NULL)", "SELECT 1 AS one FROM schema_info LIMIT 1", "INSERT INTO schema_info (version) VALUES (0)", "SELECT version FROM schema_info LIMIT 1", "BEGIN", "CREATE TABLE sm11111 (smc1 integer)", "UPDATE schema_info SET version = 1", "COMMIT", "CREATE TABLE sm (smc1 integer)", "UPDATE schema_info SET version = 2"]
   end
@@ -406,11 +463,10 @@ end
 
 describe "Sequel::TimestampMigrator" do
   before do
-    sequel_migration_version = 0
     @dsc = dsc = Class.new(Sequel::Mock::Dataset) do
-      self::FILES =[]
-      define_method(:sequel_migration_version){sequel_migration_version}
-      define_method(:sequel_migration_version=){|v| sequel_migration_version = v}
+      def files
+        db.files
+      end
 
       def columns
         super
@@ -428,11 +484,11 @@ describe "Sequel::TimestampMigrator" do
         super
         case opts[:from].first
         when :schema_info, 'schema_info'
-          yield({:version=>sequel_migration_version})
+          yield({:version=>db.sequel_migration_version})
         when :schema_migrations, 'schema_migrations'
-          self.class::FILES.sort.each{|f| yield(:filename=>f)}
+          files.sort.each{|f| yield(:filename=>f)}
         when :sm, 'sm'
-          self.class::FILES.sort.each{|f| yield(:fn=>f)}
+          files.sort.each{|f| yield(:fn=>f)}
         end
       end
 
@@ -440,9 +496,9 @@ describe "Sequel::TimestampMigrator" do
         super
         case opts[:from].first
         when :schema_info, 'schema_info'
-          self.sequel_migration_version = h.values.first
+          db.sequel_migration_version = h.values.first
         when :schema_migrations, :sm, 'schema_migrations', 'sm'
-          self.class::FILES << h.values.first
+          files << h.values.first
         end
       end
 
@@ -450,7 +506,7 @@ describe "Sequel::TimestampMigrator" do
         super
         case opts[:from].first
         when :schema_info, 'schema_info'
-          self.sequel_migration_version = h.values.first
+          db.sequel_migration_version = h.values.first
         end
       end
 
@@ -458,21 +514,33 @@ describe "Sequel::TimestampMigrator" do
         super
         case opts[:from].first
         when :schema_migrations, :sm, 'schema_migrations', 'sm'
-          self.class::FILES.delete(opts[:where].args.last)
+          files.delete(opts[:where].args.last)
         end
       end
     end
     dbc = Class.new(Sequel::Mock::Database) do
-      self::Tables = tables= {}
-      define_method(:dataset){|*a| dsc.new(self, *a)}
+      def files
+        @files ||= []
+      end
+
+      def tables
+        @tables ||= {}
+      end
+
+      def sequel_migration_version
+        @sequel_migration_version ||= 0
+      end
+      attr_writer :sequel_migration_version
+
       def create_table(name, *args, &block)
         super
-        self.class::Tables[name.to_sym] = true
+        tables[name.to_sym] = true
       end
       define_method(:drop_table){|*names| super(*names); names.each{|n| tables.delete(n.to_sym)}}
       define_method(:table_exists?){|name| super(name); tables.has_key?(name.to_sym)}
     end
     @db = dbc.new
+    @db.dataset_class = dsc
     @m = Sequel::Migrator
   end
 
@@ -510,6 +578,31 @@ describe "Sequel::TimestampMigrator" do
     [:sm2222, :sm3333].each{|n| @db.table_exists?(n).must_equal false}
     @db.table_exists?(:sm1111).must_equal true
     @db[:schema_migrations].select_order_map(:filename).must_equal %w'1273253849_create_sessions.rb'
+  end
+
+  it "should work correctly when multithreaded" do
+    range = 0..4
+    dbs = range.map do
+      db = @db.class.new
+      db.dataset_class = @db.dataset_class
+      db
+    end
+
+    q1, q2  = Queue.new, Queue.new
+    @dir = 'spec/files/timestamped_migrations'
+    threads = dbs.map do |db|
+      Thread.new do 
+        q1.pop
+        @m.apply(db, @dir)
+        [:schema_migrations, :sm1111, :sm2222, :sm3333].each{|n| _(db.table_exists?(n)).must_equal true}
+        _(db[:schema_migrations].select_order_map(:filename)).must_equal %w'1273253849_create_sessions.rb 1273253851_create_nodes.rb 1273253853_3_create_users.rb'
+        q2.push db
+      end
+    end
+
+    range.each{q1.push nil}
+    (dbs - range.map{q2.pop}).must_be :empty?
+    threads.each(&:join)
   end
 
   it "should not be current when there are migrations to apply" do
@@ -690,9 +783,9 @@ describe "Sequel::TimestampMigrator" do
 
   it "should return nil" do
     @dir = 'spec/files/timestamped_migrations'
-    @m.apply(@db, @dir, 1273253850).must_equal nil
-    @m.apply(@db, @dir, 0).must_equal nil
-    @m.apply(@db, @dir).must_equal nil
+    @m.apply(@db, @dir, 1273253850).must_be_nil
+    @m.apply(@db, @dir, 0).must_be_nil
+    @m.apply(@db, @dir).must_be_nil
   end
 
   it "should use TimestampMigrator if TimestampMigrator.apply is called even for integer migrations directory" do
@@ -706,7 +799,7 @@ describe "Sequel::TimestampMigrator" do
   end
 
   it "should use transactions by default if database supports transactional ddl" do
-    @db.meta_def(:supports_transactional_ddl?){true}
+    def @db.supports_transactional_ddl?; true end
     Sequel::TimestampMigrator.apply(@db, "spec/files/transaction_unspecified_migrations")
     @db.sqls.must_equal ["SELECT NULL AS nil FROM schema_migrations LIMIT 1", "CREATE TABLE schema_migrations (filename varchar(255) PRIMARY KEY)", "SELECT NULL AS nil FROM schema_info LIMIT 1", "SELECT filename FROM schema_migrations ORDER BY filename", "BEGIN", "CREATE TABLE sm11111 (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('001_create_alt_basic.rb')", "COMMIT", "BEGIN", "CREATE TABLE sm (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('002_create_basic.rb')", "COMMIT"]
   end
@@ -724,5 +817,24 @@ describe "Sequel::TimestampMigrator" do
   it "should not use transactions if disabled in the migrator" do
     Sequel::TimestampMigrator.run(@db, "spec/files/transaction_unspecified_migrations", :use_transactions=>false)
     @db.sqls.must_equal ["SELECT NULL AS nil FROM schema_migrations LIMIT 1", "CREATE TABLE schema_migrations (filename varchar(255) PRIMARY KEY)", "SELECT NULL AS nil FROM schema_info LIMIT 1", "SELECT filename FROM schema_migrations ORDER BY filename", "CREATE TABLE sm11111 (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('001_create_alt_basic.rb')", "CREATE TABLE sm (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('002_create_basic.rb')"]
+  end
+
+  it "should use shorter primary key field on MySQL if creating schema migrations table fails" do
+    def @db.database_type; :mysql end
+    def @db.execute_ddl(sql, *)
+      super
+      raise Sequel::DatabaseError, "Specified key was too long; max key length is 767 bytes" if sql =~ /varchar\(255\)/
+    end
+    Sequel::TimestampMigrator.run(@db, "spec/files/transaction_unspecified_migrations", :use_transactions=>false)
+    @db.sqls.must_equal ["SELECT NULL AS nil FROM schema_migrations LIMIT 1", "CREATE TABLE schema_migrations (filename varchar(255) PRIMARY KEY)", "CREATE TABLE schema_migrations (filename varchar(190) PRIMARY KEY)",  "SELECT NULL AS nil FROM schema_info LIMIT 1", "SELECT filename FROM schema_migrations ORDER BY filename", "CREATE TABLE sm11111 (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('001_create_alt_basic.rb')", "CREATE TABLE sm (smc1 integer)", "INSERT INTO schema_migrations (filename) VALUES ('002_create_basic.rb')"]
+  end
+
+  it "should not use shorter primary key field on other databases if creating schema migrations table fails" do
+    def @db.execute_ddl(sql, *)
+      super
+      raise Sequel::DatabaseError, "Specified key was too long; max key length is 767 bytes" if sql =~ /varchar\(255\)/
+    end
+    proc{Sequel::TimestampMigrator.run(@db, "spec/files/transaction_unspecified_migrations", :use_transactions=>false)}.must_raise Sequel::DatabaseError
+    @db.sqls.must_equal ["SELECT NULL AS nil FROM schema_migrations LIMIT 1", "CREATE TABLE schema_migrations (filename varchar(255) PRIMARY KEY)"]
   end
 end

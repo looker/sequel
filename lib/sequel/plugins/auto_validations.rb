@@ -33,7 +33,7 @@ module Sequel
     # By default, the plugin uses a not_null validation for NOT NULL columns, but that
     # can be changed to a presence validation using an option:
     #
-    #   Model.plugin :auto_validations, :not_null=>:presence
+    #   Model.plugin :auto_validations, not_null: :presence
     #
     # This is useful if you want to enforce that NOT NULL string columns do not
     # allow empty values.
@@ -60,7 +60,7 @@ module Sequel
       UNIQUE_OPTIONS = NOT_NULL_OPTIONS
 
       def self.apply(model, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           plugin :validation_helpers
           @auto_validate_presence = false
           @auto_validate_not_null_columns = []
@@ -81,7 +81,7 @@ module Sequel
 
       # Setup auto validations for the model if it has a dataset.
       def self.configure(model, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           setup_auto_validations if @dataset
           if opts[:not_null] == :presence
             @auto_validate_presence = true
@@ -127,15 +127,29 @@ module Sequel
           @auto_validate_types
         end
 
+        # Freeze auto_validation settings when freezing model class.
+        def freeze
+          @auto_validate_not_null_columns.freeze
+          @auto_validate_explicit_not_null_columns.freeze
+          @auto_validate_max_length_columns.freeze
+          @auto_validate_unique_columns.freeze
+
+          super
+        end
+
         # Skip automatic validations for the given validation type (:not_null, :types, :unique).
         # If :all is given as the type, skip all auto validations.
         def skip_auto_validations(type)
-          if type == :all
+          case type
+          when :all
             [:not_null, :types, :unique, :max_length].each{|v| skip_auto_validations(v)}
-          elsif type == :types
+          when :not_null
+            auto_validate_not_null_columns.clear
+            auto_validate_explicit_not_null_columns.clear
+          when :types
             @auto_validate_types = false
           else
-            send("auto_validate_#{type}_columns").clear
+            public_send("auto_validate_#{type}_columns").clear
           end
         end
 

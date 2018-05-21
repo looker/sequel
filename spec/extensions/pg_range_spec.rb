@@ -1,20 +1,39 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
-
+require_relative "spec_helper"
 
 describe "pg_range extension" do
   before(:all) do
     Sequel.extension :pg_array, :pg_range
-    @pg_types = Sequel::Postgres::PG_TYPES.dup
-  end
-  after(:all) do
-    Sequel::Postgres::PG_TYPES.replace(@pg_types)
   end
 
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
     @R = Sequel::Postgres::PGRange
-    @db.extend_datasets(Module.new{def supports_timestamp_timezones?; false; end; def supports_timestamp_usecs?; false; end})
+    @db.extend_datasets do
+      def supports_timestamp_timezones?; false end
+      def supports_timestamp_usecs?; false end
+      def quote_identifiers?; false end
+    end
     @db.extension(:pg_array, :pg_range)
+  end
+
+  it "should set up conversion procs correctly" do
+    cp = @db.conversion_procs
+    cp[3904].call("[1,2]").must_equal @R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'int4range')
+    cp[3906].call("[1,2]").must_equal @R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'numrange')
+    cp[3908].call("[2011-01-02 10:20:30,2011-02-03 10:20:30)").must_equal @R.new(Time.local(2011, 1, 2, 10, 20, 30),Time.local(2011, 2, 3, 10, 20, 30), :exclude_begin=>false, :exclude_end=>true, :db_type=>'tsrange')
+    cp[3910].call("[2011-01-02 10:20:30,2011-02-03 10:20:30)").must_equal @R.new(Time.local(2011, 1, 2, 10, 20, 30),Time.local(2011, 2, 3, 10, 20, 30), :exclude_begin=>false, :exclude_end=>true, :db_type=>'tstzrange')
+    cp[3912].call("[2011-01-02,2011-02-03)").must_equal  @R.new(Date.new(2011, 1, 2),Date.new(2011, 2, 3), :exclude_begin=>false, :exclude_end=>true, :db_type=>'daterange')
+    cp[3926].call("[1,2]").must_equal @R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'int8range')
+  end
+
+  it "should set up conversion procs for arrays correctly" do
+    cp = @db.conversion_procs
+    cp[3905].call("{\"[1,2]\"}").must_equal [@R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'int4range')]
+    cp[3907].call("{\"[1,2]\"}").must_equal [@R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'numrange')]
+    cp[3909].call("{\"[2011-01-02 10:20:30,2011-02-03 10:20:30)\"}").must_equal [@R.new(Time.local(2011, 1, 2, 10, 20, 30),Time.local(2011, 2, 3, 10, 20, 30), :exclude_begin=>false, :exclude_end=>true, :db_type=>'tsrange')]
+    cp[3911].call("{\"[2011-01-02 10:20:30,2011-02-03 10:20:30)\"}").must_equal [@R.new(Time.local(2011, 1, 2, 10, 20, 30),Time.local(2011, 2, 3, 10, 20, 30), :exclude_begin=>false, :exclude_end=>true, :db_type=>'tstzrange')]
+    cp[3913].call("{\"[2011-01-02,2011-02-03)\"}").must_equal [@R.new(Date.new(2011, 1, 2),Date.new(2011, 2, 3), :exclude_begin=>false, :exclude_end=>true, :db_type=>'daterange')]
+    cp[3927].call("{\"[1,2]\"}").must_equal [@R.new(1,2, :exclude_begin=>false, :exclude_end=>false, :db_type=>'int8range')]
   end
 
   it "should literalize Range instances to strings correctly" do
@@ -74,6 +93,12 @@ describe "pg_range extension" do
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:integer, :int4range_array, :int8range_array, :numrange_array, :daterange_array, :tsrange_array, :tstzrange_array]
   end
 
+  it "should set :ruby_default schema entries if default value is recognized" do
+    @db.fetch = [{:name=>'id', :db_type=>'integer', :default=>'1'}, {:oid=>3904, :name=>'t', :db_type=>'int4range', :default=>"'[1,5)'::int4range"}]
+    s = @db.schema(:items)
+    s[1][1][:ruby_default].must_equal Sequel::Postgres::PGRange.new(1, 5, :exclude_end=>true, :db_type=>'int4range')
+  end
+
   describe "database typecasting" do
     before do
       @o = @R.new(1, 2, :db_type=>'int4range')
@@ -128,42 +153,47 @@ describe "pg_range extension" do
   end
 
   it "should support registering custom range types" do
-    @R.register('foorange')
+    @db.register_range_type('foorange')
     @db.typecast_value(:foorange, 1..2).must_be_kind_of(@R)
     @db.fetch = [{:name=>'id', :db_type=>'foorange'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:foorange]
   end
 
   it "should support using a block as a custom conversion proc given as block" do
-    @R.register('foo2range'){|s| (s*2).to_i}
+    @db.register_range_type('foo2range'){|s| (s*2).to_i}
     @db.typecast_value(:foo2range, '[1,2]').must_be :==, (11..22)
   end
 
   it "should support using a block as a custom conversion proc given as :converter option" do
-    @R.register('foo3range', :converter=>proc{|s| (s*2).to_i})
+    @db.register_range_type('foo3range', :converter=>proc{|s| (s*2).to_i})
     @db.typecast_value(:foo3range, '[1,2]').must_be :==, (11..22)
   end
 
   it "should support using an existing scaler conversion proc via the :subtype_oid option" do
-    @R.register('foo4range', :subtype_oid=>16)
+    @db.register_range_type('foo4range', :subtype_oid=>16)
     @db.typecast_value(:foo4range, '[t,f]').must_equal @R.new(true, false, :db_type=>'foo4range')
   end
 
   it "should raise an error if using :subtype_oid option with unexisting scalar conversion proc" do
-    proc{@R.register('fooirange', :subtype_oid=>0)}.must_raise(Sequel::Error)
+    proc{@db.register_range_type('fooirange', :subtype_oid=>0)}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using :converter option and a block argument" do
-    proc{@R.register('fooirange', :converter=>proc{}){}}.must_raise(Sequel::Error)
+    proc{@db.register_range_type('fooirange', :converter=>proc{}){}}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using :subtype_oid option and a block argument" do
-    proc{@R.register('fooirange', :subtype_oid=>16){}}.must_raise(Sequel::Error)
+    proc{@db.register_range_type('fooirange', :subtype_oid=>16){}}.must_raise(Sequel::Error)
   end
 
   it "should support registering custom types with :oid option" do
-    @R.register('foo5range', :oid=>331)
-    Sequel::Postgres::PG_TYPES[331].call('[1,3)').must_be_kind_of(@R)
+    @db.register_range_type('foo5range', :oid=>331)
+    @db.conversion_procs[331].call('[1,3)').must_be_kind_of(@R)
+  end
+
+  it "should not support registering custom range types on a per-Database basis for frozen databases" do
+    @db.freeze
+    proc{@db.register_range_type('banana', :oid=>7865){|s| s}}.must_raise RuntimeError, TypeError
   end
 
   it "should support registering custom range types on a per-Database basis" do
@@ -213,7 +243,7 @@ describe "pg_range extension" do
 
   describe "parser" do
     before do
-      @p = Sequel::Postgres::PG_TYPES[3904]
+      @p = @R::Parser.new('int4range', proc(&:to_i))
       @sp = @R::Parser.new(nil)
     end
 
@@ -256,20 +286,6 @@ describe "pg_range extension" do
     end
   end
 
-  it "should set appropriate timestamp range conversion procs when resetting conversion procs" do
-    @db.reset_conversion_procs
-    procs = @db.conversion_procs
-    procs[3908].call('[2011-10-20 11:12:13,2011-10-20 11:12:14]').must_be :==, (Time.local(2011, 10, 20, 11, 12, 13)..(Time.local(2011, 10, 20, 11, 12, 14)))
-    procs[3910].call('[2011-10-20 11:12:13,2011-10-20 11:12:14]').must_be :==, (Time.local(2011, 10, 20, 11, 12, 13)..(Time.local(2011, 10, 20, 11, 12, 14)))
-  end
-
-  it "should set appropriate timestamp range array conversion procs when resetting conversion procs" do
-    @db.reset_conversion_procs
-    procs = @db.conversion_procs
-    procs[3909].call('{"[2011-10-20 11:12:13,2011-10-20 11:12:14]"}').must_be :==, [Time.local(2011, 10, 20, 11, 12, 13)..Time.local(2011, 10, 20, 11, 12, 14)]
-    procs[3911].call('{"[2011-10-20 11:12:13,2011-10-20 11:12:14]"}').must_be :==, [Time.local(2011, 10, 20, 11, 12, 13)..Time.local(2011, 10, 20, 11, 12, 14)]
-  end
-
   describe "a PGRange instance" do
     before do
       @r1 = @R.new(1, 2)
@@ -280,17 +296,17 @@ describe "pg_range extension" do
     it "should have #begin return the beginning of the range" do
       @r1.begin.must_equal 1
       @r2.begin.must_equal 3
-      @r3.begin.must_equal nil
+      @r3.begin.must_be_nil
     end
 
     it "should have #end return the end of the range" do
       @r1.end.must_equal 2
-      @r2.end.must_equal nil
+      @r2.end.must_be_nil
       @r3.end.must_equal 4
     end
 
     it "should have #db_type return the range's database type" do
-      @r1.db_type.must_equal nil
+      @r1.db_type.must_be_nil
       @r2.db_type.must_equal 'int4range'
       @r3.db_type.must_equal 'int8range'
     end
@@ -327,10 +343,8 @@ describe "pg_range extension" do
     it "should quack like a range" do
       @r1.cover?(1.5).must_equal true
       @r1.cover?(2.5).must_equal false
-      if RUBY_VERSION >= '1.9'
-        @r1.first(1).must_equal [1]
-        @r1.last(1).must_equal [2]
-      end
+      @r1.first(1).must_equal [1]
+      @r1.last(1).must_equal [2]
       @r1.to_a.must_equal [1, 2]
       @r1.first.must_equal 1
       @r1.last.must_equal 2

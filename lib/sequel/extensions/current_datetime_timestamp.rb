@@ -32,7 +32,7 @@ module Sequel
       # Return an instance of Sequel.datetime_class that will be literalized
       # as CURRENT_TIMESTAMP.
       def current_datetime
-        MAP.fetch(Sequel.datetime_class).now
+        (Sequel.datetime_class == ::Time ? Time : DateTime).now
       end
 
       private
@@ -53,9 +53,6 @@ module Sequel
 
     # DateTime subclass literalized as CURRENT_TIMESTAMP
     class DateTime < ::DateTime; end
-
-    # Mapping of Time/DateTime classes to subclasses literalized as CURRENT_TIMESTAMP
-    MAP = {::Time=>Time, ::DateTime=>DateTime}
   end
 
   Dataset.register_extension(:current_datetime_timestamp, CurrentDateTimeTimestamp::DatasetMethods)

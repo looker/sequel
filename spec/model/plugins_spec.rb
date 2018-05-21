@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model, ".plugin" do
   before do
@@ -284,16 +284,35 @@ describe Sequel::Plugins do
     m = Module.new do
       module self::ClassMethods
         Sequel::Plugins.after_set_dataset(self, :one)
+        def foo; dataset.send(:cache_get, :foo) end
         private
-        def one
-          dataset.opts[:foo] = 1
-        end
+        def one; dataset.send(:cache_set, :foo, 1) end
       end
     end
     @c.plugin m
-    @c.dataset.opts[:foo].must_equal nil
+    @c.foo.must_be_nil
     @c.set_dataset :blah
-    @c.dataset.opts[:foo].must_equal 1
+    @c.foo.must_equal 1
   end
 end
-  
+
+describe "Sequel::Model.plugin" do
+  before do
+    @c = Class.new(Sequel::Model)
+  end
+  after do
+    Sequel::Plugins.send(:remove_const, :SomethingOrOther)
+  end
+
+  it "should try loading plugins from sequel/plugins/:plugin" do
+    a = []
+    m = Module.new
+    @c.define_singleton_method(:require) do |b|
+      a << b
+      Sequel::Plugins.const_set(:SomethingOrOther, m)
+    end
+    @c.plugin :something_or_other
+    @c.plugins.must_include m
+    a.must_equal ['sequel/plugins/something_or_other']
+  end
+end

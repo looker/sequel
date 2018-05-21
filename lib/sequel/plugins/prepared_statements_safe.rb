@@ -28,7 +28,7 @@ module Sequel
       end
 
       module ClassMethods
-        # A hash with column symbol keys and default values.  Instance's
+        # A hash with column symbol keys and default values.  Instance
         # values are merged into this hash before creating to reduce the
         # number of free columns (columns that may or may not be present
         # in the INSERT statement), as the number of prepared statements
@@ -37,6 +37,13 @@ module Sequel
         
         Plugins.inherited_instance_variables(self, :@prepared_statements_column_defaults=>:dup)
         Plugins.after_set_dataset(self, :set_prepared_statements_column_defaults)
+
+        # Freeze the prepared statements column defaults when freezing the model class.
+        def freeze
+          @prepared_statements_column_defaults.freeze if @prepared_statements_column_defaults
+
+          super
+        end
 
         private
 

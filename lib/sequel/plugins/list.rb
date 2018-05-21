@@ -11,7 +11,7 @@ module Sequel
     #
     #   class Item < Sequel::Model(:items)
     #     plugin :list # will use :position field for position
-    #     plugin :list, :field=>:pos # will use :pos field for position
+    #     plugin :list, field: :pos # will use :pos field for position
     #   end
     #   
     #   item = Item[1]
@@ -38,7 +38,7 @@ module Sequel
     # For example, if each item has a +user_id+ field, and you want every user
     # to have their own list:
     #
-    #   Item.plugin :list, :scope=>:user_id
+    #   Item.plugin :list, scope: :user_id
     # 
     # Note that using this plugin modifies the order of the model's dataset to
     # sort by the position and scope fields.  Also note that this plugin is subject to
@@ -62,10 +62,10 @@ module Sequel
         model.scope_proc = case scope = opts[:scope]
         when Symbol
           model.dataset = model.dataset.order_prepend(scope)
-          proc{|obj| obj.model.filter(scope=>obj.send(scope))}
+          proc{|obj| obj.model.where(scope=>obj.public_send(scope))}
         when Array
           model.dataset = model.dataset.order_prepend(*scope)
-          proc{|obj| obj.model.filter(scope.map{|s| [s, obj.get_column_value(s)]})}
+          proc{|obj| obj.model.where(scope.map{|s| [s, obj.get_column_value(s)]})}
         else
           scope
         end
@@ -94,7 +94,7 @@ module Sequel
         def after_destroy
           super
 
-          f = Sequel.expr(position_field)
+          f = Sequel[position_field]
           list_dataset.where(f > position_value).update(f => f - 1)
         end
 
@@ -123,11 +123,11 @@ module Sequel
               ds = list_dataset
               op, ds = if target < current
                 target = 1 if target < 1
-                [:+, ds.filter(position_field=>target...current)]
+                [:+, ds.where(position_field=>target...current)]
               else
                 lp ||= last_position
                 target = lp if target > lp
-                [:-, ds.filter(position_field=>(current + 1)..target)]
+                [:-, ds.where(position_field=>(current + 1)..target)]
               end
               ds.update(position_field => Sequel::SQL::NumericExpression.new(op, position_field, 1))
               update(position_field => target)
@@ -170,16 +170,16 @@ module Sequel
           self.next(n * -1)
         end
 
-        private
-
         # Set the value of the position_field to the maximum value plus 1 unless the
         # position field already has a value.
-        def _before_validation
+        def before_validation
           unless get_column_value(position_field)
             set_column_value("#{position_field}=", list_dataset.max(position_field).to_i+1)
           end
           super
         end
+
+        private
 
         # The model's position field, an instance method for ease of use.
         def position_field

@@ -20,7 +20,7 @@
 # work correctly when used in subqueries:
 #
 #   ds = DB[:table].comment("Some\r\nComment     Here")
-#   ds.where(:id=>ds).all
+#   ds.where(id: ds).all
 #   # SELECT * FROM table WHERE (id IN (SELECT * FROM table -- Some Comment Here
 #   # )) -- Some Comment Here
 #   #
@@ -31,7 +31,7 @@
 # Due to the use of single line SQL comments and converting all
 # whitespace to spaces, this should correctly handle even
 # malicious input.  However, it would be unwise to rely on that,
-# you should probably attempt to ensure that the argument given
+# you should ensure that the argument given
 # to Dataset#comment is not derived from user input.
 #
 # You can load this extension into specific datasets:
@@ -71,7 +71,12 @@ module Sequel
           # SQL is appened to the query after the comment is added,
           # it will become part of the comment unless it is preceded
           # by a newline.
-          sql << comment
+          if sql.frozen?
+            sql += comment
+            sql.freeze
+          else
+            sql << comment
+          end
         end
         sql
       end

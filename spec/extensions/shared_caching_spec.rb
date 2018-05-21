@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Shared caching behavior" do
   before do
@@ -28,7 +28,7 @@ describe "Shared caching behavior" do
       @c.load(:id=>3, :caching_model_id=>2, :caching_model_id2=>1).caching_model2.must_be_same_as(@cm21)
       @db.sqls.must_equal []
       @db.fetch = []
-      @c.load(:id=>4, :caching_model_id=>2, :caching_model_id2=>2).caching_model2.must_equal nil
+      @c.load(:id=>4, :caching_model_id=>2, :caching_model_id2=>2).caching_model2.must_be_nil
     end
   end
 
@@ -40,7 +40,7 @@ describe "Shared caching behavior" do
       @c.load(:id=>4, :caching_model_id=>2).caching_model.must_be_same_as(@cm2)
       @db.sqls.must_equal []
       @db.fetch = []
-      @c.load(:id=>4, :caching_model_id=>3).caching_model.must_equal nil
+      @c.load(:id=>4, :caching_model_id=>3).caching_model.must_be_nil
     end
 
     it "should not use a simple primary key lookup if the assocation has a nil :key option" do
@@ -89,30 +89,6 @@ describe "Shared caching behavior" do
     it "should use a simple primary key lookup if explicitly set" do
       @c.many_to_one :caching_model, :select=>[:a, :b], :many_to_one_pk_lookup=>true
       @c.load(:id=>3, :caching_model_id=>1).caching_model
-      @db.sqls.must_equal []
-    end
-
-    it "should not use a simple primary key lookup if the prepared_statements_associations method is being used" do
-      c2 = Class.new(Sequel::Model(@db[:not_caching_model]))
-      c2.dataset._fetch = {:id=>1}
-      c = Class.new(Sequel::Model(@db[:lookup_model]))
-      c.class_eval do
-        plugin :prepared_statements_associations
-        columns :id, :caching_model_id
-        many_to_one :caching_model, :class=>c2
-      end
-      c.load(:id=>3, :caching_model_id=>1).caching_model.must_equal c2.load(:id=>1)
-      @db.sqls.wont_equal []
-    end
-
-    it "should use a simple primary key lookup if the prepared_statements_associations method is being used but associated model also uses caching" do
-      c = Class.new(Sequel::Model(:lookup_model))
-      c.class_eval do
-        plugin :prepared_statements_associations
-        columns :id, :caching_model_id
-        many_to_one :caching_model
-      end
-      c.load(:id=>3, :caching_model_id=>1).caching_model.must_be_same_as(@cm1)
       @db.sqls.must_equal []
     end
   end

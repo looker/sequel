@@ -1,42 +1,35 @@
 # frozen-string-literal: true
 
-if RUBY_VERSION < "1.9"
-  # :nocov:
-  require 'fastercsv'
-  # :nocov:
-else
-  require 'csv'
-end
+require 'csv'
 
 module Sequel
   module Plugins
     # csv_serializer handles serializing entire Sequel::Model objects to CSV,
     # as well as support for deserializing CSV directly into Sequel::Model
-    # objects.  It requires either the csv standard library when usnig ruby 1.9+,
-    # or the fastercsv gem when using ruby 1.8.
+    # objects.  It requires the csv standard library.
     #
     # Basic Example:
     #
     #   album = Album[1]
-    #   album.to_csv(:write_headers=>true)
+    #   album.to_csv(write_headers: true)
     #   # => "id,name,artist_id\n1,RF,2\n"
     #
     # You can provide options to control the CSV output:
     #
-    #   album.to_csv(:only=>:name)
-    #   album.to_csv(:except=>[:id, :artist_id])
+    #   album.to_csv(only: :name)
+    #   album.to_csv(except: [:id, :artist_id])
     #   # => "RF\n"
     #
     # +to_csv+ also exists as a class and dataset method, both of which return
     # all objects in the dataset:
     #
     #   Album.to_csv
-    #   Album.filter(:artist_id=>1).to_csv
+    #   Album.where(artist_id: 1).to_csv
     #
-    # If you have an existing array of model instance you want to convert to
+    # If you have an existing array of model instances you want to convert to
     # CSV, you can call the class to_csv method with the :array option:
     #
-    #   Album.to_csv(:array=>[Album[1], Album[2]])
+    #   Album.to_csv(array: [Album[1], Album[2]])
     #
     # In addition to creating CSV, this plugin also enables Sequel::Model
     # classes to create instances directly from CSV using the from_csv class
@@ -48,7 +41,7 @@ module Sequel
     # The array_from_csv class method exists to parse arrays of model instances
     # from CSV:
     #
-    #   csv = Album.filter(:artist_id=>1).to_csv
+    #   csv = Album.where(artist_id: 1).to_csv
     #   albums = Album.array_from_csv(csv)
     #
     # These do not necessarily round trip, since doing so would let users
@@ -56,7 +49,7 @@ module Sequel
     # call set with the values in the hash.  If you want to specify the allowed
     # fields, you can use the :headers option.
     #
-    #   Album.from_csv(album.to_csv, :headers=>%w'id name')
+    #   Album.from_csv(album.to_csv, headers: %w'id name')
     #
     # If you want to update an existing instance, you can use the from_csv
     # instance method:
@@ -76,9 +69,9 @@ module Sequel
 
       # Set up the column readers to do deserialization and the column writers
       # to save the value in deserialized_values
-      def self.configure(model, opts = {})
-        model.instance_eval do
-          @csv_serializer_opts = (@csv_serializer_opts || {}).merge(opts)
+      def self.configure(model, opts = OPTS)
+        model.instance_exec do
+          @csv_serializer_opts = (@csv_serializer_opts || OPTS).merge(opts)
         end
       end
 
@@ -87,7 +80,7 @@ module Sequel
         attr_reader :csv_serializer_opts
 
         # Attempt to parse an array of instances from the given CSV string
-        def array_from_csv(csv, opts = {})
+        def array_from_csv(csv, opts = OPTS)
           CSV.parse(csv, process_csv_serializer_opts(opts)).map do |row|
             row = row.to_hash
             row.delete(nil)
@@ -95,14 +88,23 @@ module Sequel
           end
         end
 
+        # Freeze csv serializier opts when freezing model class
+        def freeze
+          @csv_serializer_opts.freeze.each_value do |v|
+            v.freeze if v.is_a?(Array) || v.is_a?(Hash)
+          end
+
+          super
+        end
+
         # Attempt to parse a single instance from the given CSV string
-        def from_csv(csv, opts = {})
+        def from_csv(csv, opts = OPTS)
           new.from_csv(csv, opts)
         end
 
         # Convert the options hash to one that can be passed to CSV.
         def process_csv_serializer_opts(opts)
-          opts = (csv_serializer_opts || {}).merge(opts)
+          opts = (csv_serializer_opts || OPTS).merge(opts)
           opts_cols = opts.delete(:columns)
           opts_include = opts.delete(:include)
           opts_except = opts.delete(:except)
@@ -127,7 +129,7 @@ module Sequel
         #
         # :headers :: The headers to use for the CSV line. Use nil for a header
         #             to specify the column should be ignored.
-        def from_csv(csv, opts = {})
+        def from_csv(csv, opts = OPTS)
           row = CSV.parse_line(csv, model.process_csv_serializer_opts(opts)).to_hash
           row.delete(nil)
           set(row)
@@ -142,11 +144,11 @@ module Sequel
         #          output, ignoring all other columns
         # :include :: Symbol or Array of Symbols specifying non-column
         #             attributes to include in the CSV output.
-        def to_csv(opts = {})
+        def to_csv(opts = OPTS)
           opts = model.process_csv_serializer_opts(opts)
 
           CSV.generate(opts) do |csv|
-            csv << opts[:headers].map{|k| send(k)}
+            csv << opts[:headers].map{|k| public_send(k)}
           end
         end
       end
@@ -159,13 +161,13 @@ module Sequel
         #
         # :array :: An array of instances.  If this is not provided, calls #all
         #           on the receiver to get the array.
-        def to_csv(opts = {})
+        def to_csv(opts = OPTS)
           opts = model.process_csv_serializer_opts({:columns=>columns}.merge!(opts))
           items = opts.delete(:array) || self
 
           CSV.generate(opts) do |csv|
             items.each do |object|
-              csv << opts[:headers].map{|header| object.send(header) }
+              csv << opts[:headers].map{|header| object.public_send(header) }
             end
           end
         end

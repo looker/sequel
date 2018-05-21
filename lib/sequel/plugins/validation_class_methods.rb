@@ -1,8 +1,6 @@
 # frozen-string-literal: true
 
 module Sequel
-  extension :blank
-
   module Plugins
     # Sequel's built-in validation_class_methods plugin adds backwards compatibility
     # for the legacy class-level validation methods (e.g. validates_presence_of :column).
@@ -11,7 +9,7 @@ module Sequel
     # as it is less complex and more flexible.  However, this plugin provides reflection
     # support, since it is class-level, while the instance-level validation_helpers
     # plugin does not.
-    # 
+    #
     # Usage:
     #
     #   # Add the validation class methods to all model subclasses (called before loading subclasses)
@@ -39,13 +37,26 @@ module Sequel
         # options.
         attr_reader :validation_reflections
 
+        # Freeze validation metadata when freezing model class.
+        def freeze
+          @validations.freeze.each_value(&:freeze)
+          @validation_reflections.freeze.each_value do |vs|
+            vs.freeze.each do |v|
+              v.freeze
+              v.last.freeze
+            end
+          end
+
+          super
+        end
+
         # The Generator class is used to generate validation definitions using 
         # the validates {} idiom.
         class Generator
           # Initializes a new generator.
           def initialize(receiver ,&block)
             @receiver = receiver
-            instance_eval(&block)
+            instance_exec(&block)
           end
       
           # Delegates method calls to the receiver by calling receiver.validates_xxx.
@@ -86,15 +97,16 @@ module Sequel
         #
         #   class MyClass < Sequel::Model
         #     validates do
-        #       length_of :name, :minimum => 6
-        #       length_of :password, :minimum => 8
+        #       length_of :name, minimum: 6
+        #       length_of :password, minimum: 8
         #     end
         #   end
         #
         # is equivalent to:
+        #
         #   class MyClass < Sequel::Model
-        #     validates_length_of :name, :minimum => 6
-        #     validates_length_of :password, :minimum => 8
+        #     validates_length_of :name, minimum: 6
+        #     validates_length_of :password, minimum: 8
         #   end
         def validates(&block)
           Generator.new(self, &block)
@@ -105,7 +117,7 @@ module Sequel
           validations.each do |att, procs|
             v = case att
             when Array
-              att.collect{|a| o.get_column_value(a)}
+              att.map{|a| o.get_column_value(a)}
             else
               o.get_column_value(att)
             end
@@ -176,16 +188,17 @@ module Sequel
         #                   Sequel will attempt to insert a NULL value into the database, instead of using the
         #                   database's default.
         # :allow_nil :: Whether to skip the validation if the value is nil.
-        # :if :: A symbol (indicating an instance_method) or proc (which is instance_evaled)
+        # :if :: A symbol (indicating an instance_method) or proc (which is instance_execed)
         #        skipping this validation if it returns nil or false.
         # :tag :: The tag to use for this validation.
         def validates_each(*atts, &block)
           opts = extract_options!(atts)
+          blank_meth = db.method(:blank_object?).to_proc
           blk = if (i = opts[:if]) || (am = opts[:allow_missing]) || (an = opts[:allow_nil]) || (ab = opts[:allow_blank])
             proc do |o,a,v|
               next if i && !validation_if_proc(o, i)
               next if an && Array(v).all?(&:nil?)
-              next if ab && Array(v).all?(&:blank?)
+              next if ab && Array(v).all?(&blank_meth)
               next if am && Array(a).all?{|x| !o.values.has_key?(x)}
               block.call(o,a,v)
             end
@@ -261,7 +274,7 @@ module Sequel
               o.errors.add(a, opts[:message] || opts[:wrong_length]) unless v && v.size == i
             end
             if w = opts[:within]
-              o.errors.add(a, opts[:message] || opts[:wrong_length]) unless v && w.send(w.respond_to?(:cover?) ? :cover? : :include?, v.size)
+              o.errors.add(a, opts[:message] || opts[:wrong_length]) unless v && w.public_send(w.respond_to?(:cover?) ? :cover? : :include?, v.size)
             end
           end
         end
@@ -304,7 +317,7 @@ module Sequel
           reflect_validation(:presence, opts, atts)
           atts << opts
           validates_each(*atts) do |o, a, v|
-            o.errors.add(a, opts[:message]) if v.blank? && v != false
+            o.errors.add(a, opts[:message]) if db.send(:blank_object?, v) && v != false
           end
         end
         
@@ -323,7 +336,7 @@ module Sequel
           reflect_validation(:inclusion, opts, atts)
           atts << opts
           validates_each(*atts) do |o, a, v|
-            o.errors.add(a, opts[:message]) unless n.send(n.respond_to?(:cover?) ? :cover? : :include?, v)
+            o.errors.add(a, opts[:message]) unless n.public_send(n.respond_to?(:cover?) ? :cover? : :include?, v)
           end
         end
     
@@ -378,7 +391,7 @@ module Sequel
             a = Array(a)
             v = Array(v)
             next if v.empty? || !v.all?
-            ds = o.class.filter(a.zip(v))
+            ds = o.class.where(a.zip(v))
             num_dups = ds.count
             allow = if num_dups == 0
               # No unique value in the database
@@ -406,7 +419,7 @@ module Sequel
         # an empty hash is returned This method is useful when writing methods that
         # take an options hash as the last parameter.
         def extract_options!(array)
-          array.last.is_a?(Hash) ? array.pop : {}
+          array.last.is_a?(Hash) ? array.pop : OPTS
         end
 
         # Add the validation reflection to the class's validations.
@@ -422,7 +435,7 @@ module Sequel
           when Symbol
             o.get_column_value(i)
           when Proc
-            o.instance_eval(&i)
+            o.instance_exec(&i)
           else
             raise(::Sequel::Error, "invalid value for :if validation option")
           end

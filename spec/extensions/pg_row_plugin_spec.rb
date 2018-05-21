@@ -1,8 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::PgRow" do
-  before(:all) do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+  before do
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:pg_array)
     @c = Class.new(Sequel::Model(@db[:address]))
     @c.columns :street, :city
@@ -14,9 +15,6 @@ describe "Sequel::Plugins::PgRow" do
     @c2 = Class.new(Sequel::Model(@db[:company]))
     @c2.columns :address
     @c2.db_schema[:address].merge!(:type=>:pg_row_address)
-  end
-  after do
-    @c.dataset.opts[:from] = [:address]
   end
 
   it "should have schema_type_class include Sequel::Model" do
@@ -42,7 +40,7 @@ describe "Sequel::Plugins::PgRow" do
   end
 
   it "should handle literalizing model instances when model table is aliased" do
-    @c.dataset.opts[:from] = [Sequel.as(:address, :a)]
+    @c.dataset = @c.dataset.from(Sequel.as(:address, :a))
     @db.literal(@c.load(:street=>'123 Foo St', :city=>'Bar City')).must_equal "ROW('123 Foo St', 'Bar City')::address"
   end
 

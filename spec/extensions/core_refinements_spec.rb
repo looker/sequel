@@ -1,33 +1,38 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
-if RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby'
+if (RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby') # || (RUBY_VERSION >= '2.3.0' && RUBY_ENGINE == 'jruby')
 Sequel.extension :core_refinements, :pg_array, :pg_hstore, :pg_row, :pg_range, :pg_row_ops, :pg_range_ops, :pg_array_ops, :pg_hstore_ops, :pg_json, :pg_json_ops
 using Sequel::CoreRefinements
 
 describe "Core refinements" do
   before do
-    db = Sequel::Database.new
-    @d = db[:items]
-    def @d.supports_regexp?; true end
-    def @d.l(*args, &block)
-      literal(filter_expr(*args, &block))
-    end
-    def @d.lit(*args)
-      literal(*args)
+    db = Sequel.mock
+    @d = db[:items].with_extend do
+      def supports_regexp?; true end
+      def l(*args, &block)
+        literal(filter_expr(*args, &block))
+      end
+      def lit(*args)
+        literal(*args)
+      end
     end
   end
   
   it "should support NOT via Symbol#~" do
     @d.l(~:x).must_equal 'NOT x'
+  end
+
+  with_symbol_splitting "should support NOT via Symbol#~ for splittable symbols" do
     @d.l(~:x__y).must_equal 'NOT x.y'
   end
   
-  it "should support + - * / via Symbol#+,-,*,/" do
+  it "should support + - * / power via Symbol#+,-,*,/,**" do
     @d.l(:x + 1 > 100).must_equal '((x + 1) > 100)'
     @d.l((:x * :y) < 100.01).must_equal '((x * y) < 100.01)'
     @d.l((:x - :y/2) >= 100000000000000000000000000000000000).must_equal '((x - (y / 2)) >= 100000000000000000000000000000000000)'
     @d.l((((:x - :y)/(:x + :y))*:z) <= 100).must_equal '((((x - y) / (x + y)) * z) <= 100)'
     @d.l(~((((:x - :y)/(:x + :y))*:z) <= 100)).must_equal '((((x - y) / (x + y)) * z) > 100)'
+    @d.l(~((((:x ** :y)/(:x + :y))*:z) <= 100)).must_equal '(((power(x, y) / (x + y)) * z) > 100)'
   end
   
   it "should support LIKE via Symbol#like" do
@@ -95,7 +100,7 @@ describe "Core refinements" do
     @d.lit([:x.sql_function(1), 'y.z'.lit].sql_string_join(', ')).must_equal "(x(1) || ', ' || y.z)"
     @d.lit([:x, 1, :y].sql_string_join).must_equal "(x || '1' || y)"
     @d.lit([:x, 1, :y].sql_string_join(', ')).must_equal "(x || ', ' || '1' || ', ' || y)"
-    @d.lit([:x, 1, :y].sql_string_join(:y__z)).must_equal "(x || y.z || '1' || y.z || y)"
+    @d.lit([:x, 1, :y].sql_string_join(Sequel[:y][:z])).must_equal "(x || y.z || '1' || y.z || y)"
     @d.lit([:x, 1, :y].sql_string_join(1)).must_equal "(x || '1' || '1' || '1' || y)"
     @d.lit([:x, :y].sql_string_join('y.x || x.y'.lit)).must_equal "(x || y.x || x.y || y)"
     @d.lit([[:x, :y].sql_string_join, [:a, :b].sql_string_join].sql_string_join).must_equal "(x || y || a || b)"
@@ -146,7 +151,7 @@ describe "Array#case and Hash#case" do
     @d.literal([[:x, :y]].case(:z)).must_equal '(CASE WHEN x THEN y ELSE z END)'
     @d.literal([[:x, :y], [:a, :b]].case(:z)).must_equal '(CASE WHEN x THEN y WHEN a THEN b ELSE z END)'
     @d.literal([[:x, :y], [:a, :b]].case(:z, :exp)).must_equal '(CASE exp WHEN x THEN y WHEN a THEN b ELSE z END)'
-    @d.literal([[:x, :y], [:a, :b]].case(:z, :exp__w)).must_equal '(CASE exp.w WHEN x THEN y WHEN a THEN b ELSE z END)'
+    @d.literal([[:x, :y], [:a, :b]].case(:z, Sequel[:exp][:w])).must_equal '(CASE exp.w WHEN x THEN y WHEN a THEN b ELSE z END)'
   end
 
   it "should return SQL CASE expression with expression even if nil" do
@@ -171,8 +176,8 @@ describe "Array#sql_value_list and #sql_array" do
   end
 
   it "should treat the array as an SQL value list instead of conditions when used as a placeholder value" do
-    @d.filter("(a, b) IN ?", [[:x, 1], [:y, 2]]).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x = 1) AND (y = 2)))'
-    @d.filter("(a, b) IN ?", [[:x, 1], [:y, 2]].sql_value_list).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
+    @d.filter(Sequel.lit("(a, b) IN ?", [[:x, 1], [:y, 2]])).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x = 1) AND (y = 2)))'
+    @d.filter(Sequel.lit("(a, b) IN ?", [[:x, 1], [:y, 2]].sql_value_list)).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
   end
 
   it "should be no difference when used as a hash value" do
@@ -183,7 +188,7 @@ end
 
 describe "String#lit" do
   before do
-    @ds = Sequel::Database.new[:t]
+    @ds = Sequel.mock[:t]
   end
 
   it "should return an LiteralString object" do
@@ -199,16 +204,14 @@ describe "String#lit" do
     a = 'DISTINCT ?'.lit(:a)
     a.must_be_kind_of(Sequel::SQL::PlaceholderLiteralString)
     @ds.literal(a).must_equal 'DISTINCT a'
-    @ds.quote_identifiers = true
-    @ds.literal(a).must_equal 'DISTINCT "a"'
+    @ds.with_quote_identifiers(true).literal(a).must_equal 'DISTINCT "a"'
   end
   
   it "should handle named placeholders if given a single argument hash" do
     a = 'DISTINCT :b'.lit(:b=>:a)
     a.must_be_kind_of(Sequel::SQL::PlaceholderLiteralString)
     @ds.literal(a).must_equal 'DISTINCT a'
-    @ds.quote_identifiers = true
-    @ds.literal(a).must_equal 'DISTINCT "a"'
+    @ds.with_quote_identifiers(true).literal(a).must_equal 'DISTINCT "a"'
   end
 
   it "should treat placeholder literal strings as generic expressions" do
@@ -237,7 +240,9 @@ describe "#desc" do
   
   it "should format a DESC clause for a column ref" do
     @ds.literal(:test.desc).must_equal 'test DESC'
+  end
     
+  with_symbol_splitting "should format a DESC clause for a column ref with splittable symbol" do
     @ds.literal(:items__price.desc).must_equal 'items.price DESC'
   end
 
@@ -253,7 +258,9 @@ describe "#asc" do
   
   it "should format a ASC clause for a column ref" do
     @ds.literal(:test.asc).must_equal 'test ASC'
+  end
     
+  with_symbol_splitting "should format a ASC clause for a column ref with splittable symbol" do
     @ds.literal(:items__price.asc).must_equal 'items.price ASC'
   end
 
@@ -269,7 +276,9 @@ describe "#as" do
   
   it "should format a AS clause for a column ref" do
     @ds.literal(:test.as(:t)).must_equal 'test AS t'
+  end
     
+  with_symbol_splitting "should format a AS clause for a column ref with splittable symbols" do
     @ds.literal(:items__price.as(:p)).must_equal 'items.price AS p'
   end
 
@@ -284,22 +293,12 @@ end
 
 describe "Column references" do
   before do
-    @ds = Sequel::Database.new.dataset
-    def @ds.quoted_identifier_append(sql, c)
-      sql << "`#{c}`"
-    end
-    @ds.quote_identifiers = true
+    @ds = Sequel.mock.dataset.with_quote_identifiers(true).with_extend{def quoted_identifier_append(sql, c) sql << "`#{c}`" end}
   end
   
   it "should be quoted properly" do
     @ds.literal(:xyz).must_equal "`xyz`"
-    @ds.literal(:xyz__abc).must_equal "`xyz`.`abc`"
-
     @ds.literal(:xyz.as(:x)).must_equal "`xyz` AS `x`"
-    @ds.literal(:xyz__abc.as(:x)).must_equal "`xyz`.`abc` AS `x`"
-
-    @ds.literal(:xyz___x).must_equal "`xyz` AS `x`"
-    @ds.literal(:xyz__abc___x).must_equal "`xyz`.`abc` AS `x`"
   end
   
   it "should be quoted properly in SQL functions" do
@@ -315,6 +314,13 @@ describe "Column references" do
   
   it "should be quoted properly in a cast function" do
     @ds.literal(:x.cast(:integer)).must_equal "CAST(`x` AS integer)"
+  end
+
+  with_symbol_splitting "should be quoted properly when using splittable symbols" do
+    @ds.literal(:xyz__abc).must_equal "`xyz`.`abc`"
+    @ds.literal(:xyz__abc.as(:x)).must_equal "`xyz`.`abc` AS `x`"
+    @ds.literal(:xyz___x).must_equal "`xyz` AS `x`"
+    @ds.literal(:xyz__abc___x).must_equal "`xyz`.`abc` AS `x`"
     @ds.literal(:x__y.cast('varchar(20)')).must_equal "CAST(`x`.`y` AS varchar(20))"
   end
 end
@@ -341,37 +347,39 @@ describe "Symbol#*" do
     @ds.literal(:abc.*(5)).must_equal '(abc * 5)'
   end
 
-  it "should support qualified symbols if no argument" do
+  with_symbol_splitting "should support qualified symbols if no argument" do
     @ds.literal(:xyz__abc.*).must_equal 'xyz.abc.*'
   end
 end
 
 describe "Symbol" do
   before do
-    @ds = Sequel.mock.dataset
-    @ds.quote_identifiers = true
-    @ds.identifier_input_method = :upcase
+    @ds = Sequel.mock.dataset.with_quote_identifiers(true)
   end
 
   it "#identifier should format an identifier" do
-    @ds.literal(:xyz__abc.identifier).must_equal '"XYZ__ABC"'
+    @ds.literal(:xyz__abc.identifier).must_equal '"xyz__abc"'
   end
 
   it "#qualify should format a qualified column" do
-    @ds.literal(:xyz.qualify(:abc)).must_equal '"ABC"."XYZ"'
+    @ds.literal(:xyz.qualify(:abc)).must_equal '"abc"."xyz"'
   end
 
   it "#qualify should work on QualifiedIdentifiers" do
-    @ds.literal(:xyz.qualify(:abc).qualify(:def)).must_equal '"DEF"."ABC"."XYZ"'
+    @ds.literal(:xyz.qualify(:abc).qualify(:def)).must_equal '"def"."abc"."xyz"'
   end
 
   it "should be able to qualify an identifier" do
-    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).must_equal '"XYZ"."ABC"."XYZ"'
+    @ds.literal(:xyz.identifier.qualify(Sequel[:xyz][:abc])).must_equal '"xyz"."abc"."xyz"'
+  end
+
+  with_symbol_splitting "should be able to qualify an identifier with qualified symbol" do
+    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).must_equal '"xyz"."abc"."xyz"'
   end
 
   it "should be able to specify a schema.table.column" do
-    @ds.literal(:column.qualify(:table.qualify(:schema))).must_equal '"SCHEMA"."TABLE"."COLUMN"'
-    @ds.literal(:column.qualify(:table__name.identifier.qualify(:schema))).must_equal '"SCHEMA"."TABLE__NAME"."COLUMN"'
+    @ds.literal(:column.qualify(:table.qualify(:schema))).must_equal '"schema"."table"."column"'
+    @ds.literal(:column.qualify(:table__name.identifier.qualify(:schema))).must_equal '"schema"."table__name"."column"'
   end
 
   it "should be able to specify order" do
@@ -386,13 +394,13 @@ describe "Symbol" do
   it "should work correctly with objects" do
     o = Object.new
     def o.sql_literal(ds) "(foo)" end
-    @ds.literal(:column.qualify(o)).must_equal '(foo)."COLUMN"'
+    @ds.literal(:column.qualify(o)).must_equal '(foo)."column"'
   end
 end
 
 describe "Symbol" do
   before do
-    @ds = Sequel::Database.new.dataset
+    @ds = Sequel.mock.dataset
   end
   
   it "should support sql_function method" do
@@ -404,9 +412,12 @@ describe "Symbol" do
     @ds.literal(:abc.cast(:integer)).must_equal "CAST(abc AS integer)"
   end
 
+  with_symbol_splitting "should support sql array accesses via sql_subscript for splittable symbols" do
+    @ds.literal(:abc__def.sql_subscript(1)).must_equal "abc.def[1]"
+  end
+
   it "should support sql array accesses via sql_subscript" do
     @ds.literal(:abc.sql_subscript(1)).must_equal "abc[1]"
-    @ds.literal(:abc__def.sql_subscript(1)).must_equal "abc.def[1]"
     @ds.literal(:abc.sql_subscript(1)|2).must_equal "abc[1, 2]"
     @ds.literal(:abc.sql_subscript(1)[2]).must_equal "abc[1][2]"
   end
@@ -514,6 +525,4 @@ describe "Postgres extensions integration" do
     @db.literal((1..2).pg_range(:int4range)).must_equal "int4range(1,2,'[]')"
   end
 end
-else
-  skip_warn "core_refinements extension: only works on ruby 2.0+"
 end

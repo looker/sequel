@@ -1,9 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "constraint_validations extension" do
   def parse_insert(s)
-    m = /\AINSERT INTO sequel_constraint_validations \((.*)\) VALUES \((.*)\)\z/.match(s)
-    Hash[*m[1].split(', ').map{|v| v.to_sym}.zip(m[2].split(', ').map{|v| parse_insert_value(v)}).reject{|k, v| v.nil?}.flatten]
+    m = /\AINSERT INTO "?sequel_constraint_validations"? \("?(.*)"?\) VALUES \((.*)\)\z/.match(s)
+    Hash[*m[1].split(/"?, "?/).map{|v| v.to_sym}.zip(m[2].split(/"?, "?/).map{|v| parse_insert_value(v)}).reject{|k, v| v.nil?}.flatten]
   end
 
   def parse_insert_value(s)
@@ -130,13 +130,17 @@ describe "constraint_validations extension" do
 
   it "should handle presence validation on Oracle with IS NOT NULL instead of != ''" do
     @db = Sequel.mock(:host=>'oracle')
+    @db.extend_datasets do
+      def quote_identifiers?; false end
+      def input_identifier(v) v.to_s end
+    end
     @db.extension(:constraint_validations)
     @db.create_table(:foo){String :name; validate{presence :name}}
     sqls = @db.sqls
-    s = sqls.slice!(1)
-    m = /\AINSERT INTO sequel_constraint_validations \((.*)\) SELECT (.*) FROM DUAL\z/.match(s)
-    Hash[*m[1].split(', ').map{|v| v.to_sym}.zip(m[2].split(', ').map{|v| parse_insert_value(v)}).reject{|k, v| v.nil?}.flatten].must_equal(:validation_type=>"presence", :column=>"name", :table=>"foo")
-    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (trim(name) IS NOT NULL)))"]
+    s = sqls.slice!(1).upcase
+    m = /\AINSERT INTO sequel_constraint_validations \((.*)\) SELECT (.*) FROM DUAL\z/i.match(s)
+    Hash[*m[1].split(', ').map{|v| v.downcase.to_sym}.zip(m[2].split(', ').map{|v| parse_insert_value(v.downcase.gsub('null', 'NULL'))}).reject{|k, v| v.nil?}.flatten].must_equal(:validation_type=>"presence", :column=>"name", :table=>"foo")
+    sqls.must_equal ["BEGIN", "COMMIT", 'CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (trim(name) IS NOT NULL)))']
   end
 
   it "should assume column is not a String if it can't determine the type" do
@@ -194,20 +198,22 @@ describe "constraint_validations extension" do
 
   it "should support :format constraint validation" do
     @db = Sequel.mock(:host=>'postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:constraint_validations)
     @db.create_table(:foo){String :name; validate{format(/^foo.*/, :name)}}
     sqls = @db.sqls
     parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"format", :column=>"name", :table=>"foo", :argument=>'^foo.*')
-    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name text, CHECK ((name IS NOT NULL) AND (name ~ '^foo.*')))"]
+    sqls.must_equal ["BEGIN", "COMMIT", %[CREATE TABLE foo (name text, CHECK ((name IS NOT NULL) AND (name ~ '^foo.*')))]]
   end
 
   it "should support :format constraint validation with case insensitive format" do
     @db = Sequel.mock(:host=>'postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:constraint_validations)
     @db.create_table(:foo){String :name; validate{format(/^foo.*/i, :name)}}
     sqls = @db.sqls
     parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"iformat", :column=>"name", :table=>"foo", :argument=>'^foo.*')
-    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name text, CHECK ((name IS NOT NULL) AND (name ~* '^foo.*')))"]
+    sqls.must_equal ["BEGIN", "COMMIT", %[CREATE TABLE foo (name text, CHECK ((name IS NOT NULL) AND (name ~* '^foo.*')))]]
   end
 
   it "should support :includes constraint validation with an array of strings" do
@@ -250,6 +256,62 @@ describe "constraint_validations extension" do
     sqls = @db.sqls
     parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"ilike", :column=>"name", :table=>"foo", :argument=>'foo%')
     sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (UPPER(name) LIKE UPPER('foo%') ESCAPE '\\')))"]
+  end
+
+  it "should support :operator :< constraint validation with string" do
+    @db.create_table(:foo){String :name; validate{operator :<, 'a', :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"str_lt", :column=>"name", :table=>"foo", :argument=>'a')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (name < 'a')))"]
+  end
+
+  it "should support :operator :<= constraint validation with string" do
+    @db.create_table(:foo){String :name; validate{operator :<=, 'a', :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"str_lte", :column=>"name", :table=>"foo", :argument=>'a')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (name <= 'a')))"]
+  end
+
+  it "should support :operator :> constraint validation with string" do
+    @db.create_table(:foo){String :name; validate{operator :>, 'a', :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"str_gt", :column=>"name", :table=>"foo", :argument=>'a')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (name > 'a')))"]
+  end
+
+  it "should support :operator :>= constraint validation with string" do
+    @db.create_table(:foo){String :name; validate{operator :>=, 'a', :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"str_gte", :column=>"name", :table=>"foo", :argument=>'a')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name varchar(255), CHECK ((name IS NOT NULL) AND (name >= 'a')))"]
+  end
+
+  it "should support :operator :< constraint validation with integer" do
+    @db.create_table(:foo){Integer :name; validate{operator :<, 2, :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"int_lt", :column=>"name", :table=>"foo", :argument=>'2')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name integer, CHECK ((name IS NOT NULL) AND (name < 2)))"]
+  end
+
+  it "should support :operator :<= constraint validation with integer" do
+    @db.create_table(:foo){Integer :name; validate{operator :<=, 2, :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"int_lte", :column=>"name", :table=>"foo", :argument=>'2')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name integer, CHECK ((name IS NOT NULL) AND (name <= 2)))"]
+  end
+
+  it "should support :operator :> constraint validation with integer" do
+    @db.create_table(:foo){Integer :name; validate{operator :>, 2, :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"int_gt", :column=>"name", :table=>"foo", :argument=>'2')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name integer, CHECK ((name IS NOT NULL) AND (name > 2)))"]
+  end
+
+  it "should support :operator :>= constraint validation with integer" do
+    @db.create_table(:foo){Integer :name; validate{operator :>=, 2, :name}}
+    sqls = @db.sqls
+    parse_insert(sqls.slice!(1)).must_equal(:validation_type=>"int_gte", :column=>"name", :table=>"foo", :argument=>'2')
+    sqls.must_equal ["BEGIN", "COMMIT", "CREATE TABLE foo (name integer, CHECK ((name IS NOT NULL) AND (name >= 2)))"]
   end
 
   it "should support :unique constraint validation" do
@@ -295,6 +357,14 @@ describe "constraint_validations extension" do
 
   it "should raise an error if attempting to validate inclusion with a unsupported object" do
     proc{@db.create_table(:foo){String :name; validate{includes 'a', :name}}}.must_raise(Sequel::Error)
+  end
+
+  it "should raise an error if attempting attempting to process an operator validation with an unsupported operator" do
+    proc{@db.alter_table(:foo){String :name;  validate{operator :===, 'a', :name}}}.must_raise(Sequel::Error)
+  end
+
+  it "should raise an error if attempting attempting to process an operator validation with an unsupported argument" do
+    proc{@db.alter_table(:foo){String :name;  validate{operator :>, [], :name}}}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if attempting to drop a constraint validation in a create_table generator" do

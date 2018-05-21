@@ -1,15 +1,15 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
+require_relative "spec_helper"
 
 describe "A new Database" do
   before do
     @db = Sequel::Database.new(1 => 2, :logger => 3)
   end
-  after do
-    Sequel.quote_identifiers = false
-    Sequel.identifier_input_method = nil
-    Sequel.identifier_output_method = nil
-  end
   
+  it "should not allow dup/clone" do
+    proc{@db.dup}.must_raise NoMethodError
+    proc{@db.clone}.must_raise NoMethodError
+  end
+
   it "should receive options" do
     @db.opts[1].must_equal 2
     @db.opts[:logger].must_equal 3  
@@ -26,6 +26,7 @@ describe "A new Database" do
   it "should support :preconnect option to preconnect to database" do
     @db.pool.size.must_equal 0
     c = Class.new(Sequel::Database) do
+      def dataset_class_default; Sequel::Dataset end
       def connect(_)
         :connect
       end
@@ -59,7 +60,7 @@ describe "A new Database" do
   it "should have the connection pool use the connect method to get connections" do
     cc = nil
     d = Sequel::Database.new
-    meta_def(d, :connect){|c| 1234}
+    d.define_singleton_method(:connect){|c| 1234}
     d.synchronize {|c| cc = c}
     cc.must_equal 1234
   end
@@ -79,141 +80,12 @@ describe "A new Database" do
     db.pool.must_be_kind_of(Sequel::ConnectionPool)
   end
 
-  it "should respect the :quote_identifiers option" do
-    db = Sequel::Database.new(:quote_identifiers=>false)
-    db.quote_identifiers?.must_equal false
-    db = Sequel::Database.new(:quote_identifiers=>true)
-    db.quote_identifiers?.must_equal true
-  end
-
-  it "should upcase on input and downcase on output by default" do
-    db = Sequel::Database.new
-    db.send(:identifier_input_method_default).must_equal :upcase
-    db.send(:identifier_output_method_default).must_equal :downcase
-  end
-
-  it "should respect the :identifier_input_method option" do
-    Sequel.identifier_input_method = nil
-    Sequel::Database.identifier_input_method.must_equal false
-    db = Sequel::Database.new(:identifier_input_method=>nil)
-    db.identifier_input_method.must_equal nil
-    db.identifier_input_method = :downcase
-    db.identifier_input_method.must_equal :downcase
-    db = Sequel::Database.new(:identifier_input_method=>:upcase)
-    db.identifier_input_method.must_equal :upcase
-    db.identifier_input_method = nil
-    db.identifier_input_method.must_equal nil
-    Sequel.identifier_input_method = :downcase
-    Sequel::Database.identifier_input_method.must_equal :downcase
-    db = Sequel::Database.new(:identifier_input_method=>nil)
-    db.identifier_input_method.must_equal nil
-    db.identifier_input_method = :upcase
-    db.identifier_input_method.must_equal :upcase
-    db = Sequel::Database.new(:identifier_input_method=>:upcase)
-    db.identifier_input_method.must_equal :upcase
-    db.identifier_input_method = nil
-    db.identifier_input_method.must_equal nil
-  end
-  
-  it "should respect the :identifier_output_method option" do
-    Sequel.identifier_output_method = nil
-    Sequel::Database.identifier_output_method.must_equal false
-    db = Sequel::Database.new(:identifier_output_method=>nil)
-    db.identifier_output_method.must_equal nil
-    db.identifier_output_method = :downcase
-    db.identifier_output_method.must_equal :downcase
-    db = Sequel::Database.new(:identifier_output_method=>:upcase)
-    db.identifier_output_method.must_equal :upcase
-    db.identifier_output_method = nil
-    db.identifier_output_method.must_equal nil
-    Sequel.identifier_output_method = :downcase
-    Sequel::Database.identifier_output_method.must_equal :downcase
-    db = Sequel::Database.new(:identifier_output_method=>nil)
-    db.identifier_output_method.must_equal nil
-    db.identifier_output_method = :upcase
-    db.identifier_output_method.must_equal :upcase
-    db = Sequel::Database.new(:identifier_output_method=>:upcase)
-    db.identifier_output_method.must_equal :upcase
-    db.identifier_output_method = nil
-    db.identifier_output_method.must_equal nil
-  end
-
-  it "should use the default Sequel.quote_identifiers value" do
-    Sequel.quote_identifiers = true
-    Sequel::Database.new({}).quote_identifiers?.must_equal true
-    Sequel.quote_identifiers = false
-    Sequel::Database.new({}).quote_identifiers?.must_equal false
-    Sequel::Database.quote_identifiers = true
-    Sequel::Database.new({}).quote_identifiers?.must_equal true
-    Sequel::Database.quote_identifiers = false
-    Sequel::Database.new({}).quote_identifiers?.must_equal false
-  end
-
-  it "should use the default Sequel.identifier_input_method value" do
-    Sequel.identifier_input_method = :downcase
-    Sequel::Database.new({}).identifier_input_method.must_equal :downcase
-    Sequel.identifier_input_method = :upcase
-    Sequel::Database.new({}).identifier_input_method.must_equal :upcase
-    Sequel::Database.identifier_input_method = :downcase
-    Sequel::Database.new({}).identifier_input_method.must_equal :downcase
-    Sequel::Database.identifier_input_method = :upcase
-    Sequel::Database.new({}).identifier_input_method.must_equal :upcase
-  end
-  
-  it "should use the default Sequel.identifier_output_method value" do
-    Sequel.identifier_output_method = :downcase
-    Sequel::Database.new({}).identifier_output_method.must_equal :downcase
-    Sequel.identifier_output_method = :upcase
-    Sequel::Database.new({}).identifier_output_method.must_equal :upcase
-    Sequel::Database.identifier_output_method = :downcase
-    Sequel::Database.new({}).identifier_output_method.must_equal :downcase
-    Sequel::Database.identifier_output_method = :upcase
-    Sequel::Database.new({}).identifier_output_method.must_equal :upcase
-  end
-
-  it "should respect the quote_indentifiers_default method if Sequel.quote_identifiers = nil" do
-    Sequel.quote_identifiers = nil
-    Sequel::Database.new({}).quote_identifiers?.must_equal true
-    x = Class.new(Sequel::Database){def quote_identifiers_default; false end}
-    x.new({}).quote_identifiers?.must_equal false
-    y = Class.new(Sequel::Database){def quote_identifiers_default; true end}
-    y.new({}).quote_identifiers?.must_equal true
-  end
-  
-  it "should respect the identifier_input_method_default method" do
-    class Sequel::Database
-      @identifier_input_method = nil
-    end
-    x = Class.new(Sequel::Database){def identifier_input_method_default; :downcase end}
-    x.new({}).identifier_input_method.must_equal :downcase
-    y = Class.new(Sequel::Database){def identifier_input_method_default; :camelize end}
-    y.new({}).identifier_input_method.must_equal :camelize
-  end
-  
-  it "should respect the identifier_output_method_default method if Sequel.identifier_output_method is not called" do
-    class Sequel::Database
-      @identifier_output_method = nil
-    end
-    x = Class.new(Sequel::Database){def identifier_output_method_default; :upcase end}
-    x.new({}).identifier_output_method.must_equal :upcase
-    y = Class.new(Sequel::Database){def identifier_output_method_default; :underscore end}
-    y.new({}).identifier_output_method.must_equal :underscore
-  end
-
   it "should just use a :uri option for jdbc with the full connection string" do
-    db = Sequel::Database.stub(:adapter_class, Sequel::Database) do
+    db = Sequel::Database.stub(:adapter_class, Class.new(Sequel::Database){def connect(*); Object.new end}) do
       Sequel.connect('jdbc:test://host/db_name')
     end
     db.must_be_kind_of(Sequel::Database)
     db.opts[:uri].must_equal 'jdbc:test://host/db_name'
-  end
-
-  it "should just use a :uri option for do with the full connection string" do
-    db = Sequel::Database.stub(:adapter_class, Sequel::Database) do
-      Sequel.connect('do:test://host/db_name')
-    end
-    db.must_be_kind_of(Sequel::Database)
-    db.opts[:uri].must_equal 'do:test://host/db_name'
   end
 
   it "should populate :adapter option when using connection string" do
@@ -227,7 +99,41 @@ describe "A new Database" do
 
   it 'should strip square brackets for ipv6 hosts' do
     Sequel.connect('mock://[::1]').opts[:host].must_equal "::1"
-  end if RUBY_VERSION >= '1.9.3'
+  end
+end
+
+describe "Database :connect_sqls option" do
+  it "should issue the each sql query for each new connection" do
+    db = Sequel.mock(:connect_sqls=>['SELECT 1', 'SELECT 2'])
+    db.sqls.must_equal ['SELECT 1', 'SELECT 2']
+    db['SELECT 3'].get
+    db.sqls.must_equal ['SELECT 3']
+    db.disconnect
+    db['SELECT 3'].get
+    db.sqls.must_equal ['SELECT 1', 'SELECT 2', 'SELECT 3']
+  end
+end
+
+describe "Database#freeze" do
+  before do
+    @db = Sequel.mock.freeze
+  end
+
+  it "should freeze internal structures" do
+    @db.instance_exec do
+      frozen?.must_equal true
+      opts.frozen?.must_equal true
+      pool.frozen?.must_equal true
+      loggers.frozen?.must_equal true
+      @dataset_class.frozen?.must_equal true
+      @dataset_modules.frozen?.must_equal true
+      @schema_type_classes.frozen?.must_equal true
+      from(:a).frozen?.must_equal  true
+      metadata_dataset.frozen?.must_equal true
+    end
+
+    proc{@db.extend_datasets{}}.must_raise RuntimeError, TypeError
+  end
 end
 
 describe "Database#disconnect" do
@@ -268,84 +174,12 @@ describe "Database#log_info" do
   end
 end
 
-describe "Database#log_yield" do
-  before do
-    @o = Object.new
-    def @o.logs; @logs || []; end
-    def @o.warn(*args); (@logs ||= []) << [:warn] + args; end
-    def @o.method_missing(*args); (@logs ||= []) << args; end
-    def @o.to_ary; [self]; end
-    @db = Sequel::Database.new(:logger=>@o)
-  end
-
-  it "should yield to the passed block" do
-    a = nil
-    @db.log_yield('blah'){a = 1}
-    a.must_equal 1
-  end
-
-  it "should raise an exception if a block is not passed" do
-    proc{@db.log_yield('blah')}.must_raise LocalJumpError
-  end
-
-  it "should log message with duration at info level to all loggers" do
-    @db.log_yield('blah'){}
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :info
-    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
-  end
-
-  it "should respect sql_log_level setting" do
-    @db.sql_log_level = :debug
-    @db.log_yield('blah'){}
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :debug
-    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
-  end
-
-  it "should log message with duration at warn level if duration greater than log_warn_duration" do
-    @db.log_warn_duration = 0
-    @db.log_yield('blah'){}
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :warn
-    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
-  end
-
-  it "should log message with duration at info level if duration less than log_warn_duration" do
-    @db.log_warn_duration = 1000
-    @db.log_yield('blah'){}
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :info
-    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
-  end
-
-  it "should log message at error level if block raises an error" do
-    @db.log_warn_duration = 0
-    proc{@db.log_yield('blah'){raise Sequel::Error, 'adsf'}}.must_raise Sequel::Error
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :error
-    @o.logs.first.last.must_match(/\ASequel::Error: adsf: blah\z/)
-  end
-
-  it "should include args with message if args passed" do
-    @db.log_yield('blah', [1, 2]){}
-    @o.logs.length.must_equal 1
-    @o.logs.first.length.must_equal 2
-    @o.logs.first.first.must_equal :info
-    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah; \[1, 2\]\z/)
-  end
-end
-
 describe "Database#log_connection_yield" do
   before do
     @o = Object.new
     def @o.logs; @logs || []; end
     def @o.to_ary; [self]; end
+    def @o.warn(*args); (@logs ||= []) << [:warn] + args; end
     def @o.method_missing(*args); (@logs ||= []) << args; end
     @conn = Object.new
     @db = Sequel::Database.new(:logger=>@o)
@@ -368,11 +202,75 @@ describe "Database#log_connection_yield" do
     @o.logs.first.first.must_equal :info
     @o.logs.first.last.must_match(/\(conn: -?\d+\) some SQL\z/)
   end
+
+  it "should yield to the passed block" do
+    a = nil
+    @db.log_connection_yield('blah', @conn){a = 1}
+    a.must_equal 1
+  end
+
+  it "should raise an exception if a block is not passed" do
+    proc{@db.log_connection_yield('blah', @conn)}.must_raise LocalJumpError
+  end
+
+  it "should log message with duration at info level to all loggers" do
+    @db.log_connection_yield('blah', @conn){}
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :info
+    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
+  end
+
+  it "should respect sql_log_level setting" do
+    @db.sql_log_level = :debug
+    @db.log_connection_yield('blah', @conn){}
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :debug
+    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
+  end
+
+  it "should log message with duration at warn level if duration greater than log_warn_duration" do
+    @db.log_warn_duration = 0
+    @db.log_connection_yield('blah', @conn){}
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :warn
+    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
+  end
+
+  it "should log message with duration at info level if duration less than log_warn_duration" do
+    @db.log_warn_duration = 1000
+    @db.log_connection_yield('blah', @conn){}
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :info
+    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah\z/)
+  end
+
+  it "should log message at error level if block raises an error" do
+    @db.log_warn_duration = 0
+    proc{@db.log_connection_yield('blah', @conn){raise Sequel::Error, 'adsf'}}.must_raise Sequel::Error
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :error
+    @o.logs.first.last.must_match(/\ASequel::Error: adsf: blah\z/)
+  end
+
+  it "should include args with message if args passed" do
+    @db.log_connection_yield('blah', @conn, [1, 2]){}
+    @o.logs.length.must_equal 1
+    @o.logs.first.length.must_equal 2
+    @o.logs.first.first.must_equal :info
+    @o.logs.first.last.must_match(/\A\(\d\.\d{6}s\) blah; \[1, 2\]\z/)
+  end
 end
 
 describe "Database#uri" do
   before do
     @c = Class.new(Sequel::Database) do
+      def dataset_class_default; Sequel::Dataset end
+      def connect(*); Object.new end
       set_adapter_scheme :mau
     end
     
@@ -384,7 +282,7 @@ describe "Database#uri" do
   end
   
   it "should return nil if a connection uri was not used" do
-    Sequel.mock.uri.must_equal nil
+    Sequel.mock.uri.must_be_nil
   end
   
   it "should be aliased as #url" do
@@ -394,9 +292,10 @@ end
 
 describe "Database.adapter_scheme and #adapter_scheme" do
   it "should return the database scheme" do
-    Sequel::Database.adapter_scheme.must_equal nil
+    Sequel::Database.adapter_scheme.must_be_nil
 
     @c = Class.new(Sequel::Database) do
+      def dataset_class_default; Sequel::Dataset end
       set_adapter_scheme :mau
     end
     
@@ -407,7 +306,7 @@ end
 
 describe "Database#dataset" do
   before do
-    @db = Sequel::Database.new
+    @db = Sequel.mock
     @ds = @db.dataset
   end
   
@@ -427,10 +326,8 @@ describe "Database#dataset" do
     e.sql.must_equal 'SELECT * FROM miu'
   end
   
-  it "should provide a filtered #from dataset if a block is given" do
-    d = @db.from(:mau){x.sql_number > 100}
-    d.must_be_kind_of(Sequel::Dataset)
-    d.sql.must_equal 'SELECT * FROM mau WHERE (x > 100)'
+  it "should provide a #from dataset that supports virtual row blocks" do
+    @db.from{a(b)}.sql.must_equal 'SELECT * FROM a(b)'
   end
   
   it "should provide a #select dataset" do
@@ -516,8 +413,11 @@ describe "Database#extend_datasets" do
   end
 
   it "should be able to override methods defined in the original Dataset class" do
-    @db.extend_datasets(Module.new{def select(*a, &block) super.order(*a, &block) end})
-    @db[:t].select(:a, :b).sql.must_equal 'SELECT a, b FROM t ORDER BY a, b'
+    @db.extend_datasets do
+      def select(*a, &block) super.order(*a, &block) end
+      def input_identifier(v) v.to_s end
+    end
+    @db[:t].with_quote_identifiers(false).select(:a, :b).sql.must_equal 'SELECT a, b FROM t ORDER BY a, b'
   end
 
   it "should reapply settings if dataset_class is changed" do
@@ -529,6 +429,136 @@ describe "Database#extend_datasets" do
   end
 end
   
+describe "Database#extend_datasets custom methods" do
+  before do
+    @db = Sequel.mock
+  end
+
+  def ds
+    @db[:items]
+  end
+  
+  it "should have dataset_module support a where method" do
+    @db.extend_datasets{where :released, :released}
+    ds.released.sql.must_equal 'SELECT * FROM items WHERE released'
+    ds.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE (foo AND released)'
+  end
+
+  it "should have dataset_module support a having method" do
+    @db.extend_datasets{having(:released){released}}
+    ds.released.sql.must_equal 'SELECT * FROM items HAVING released'
+    ds.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE foo HAVING released'
+  end
+
+  it "should have dataset_module support an exclude method" do
+    @db.extend_datasets{exclude :released, :released}
+    ds.released.sql.must_equal 'SELECT * FROM items WHERE NOT released'
+    ds.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE (foo AND NOT released)'
+  end
+
+  it "should have dataset_module support an exclude_having method" do
+    @db.extend_datasets{exclude_having :released, :released}
+    ds.released.sql.must_equal 'SELECT * FROM items HAVING NOT released'
+    ds.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE foo HAVING NOT released'
+  end
+
+  it "should have dataset_module support a distinct method" do
+    @db.extend_datasets{def supports_distinct_on?; true end; distinct :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT DISTINCT ON (baz) * FROM items'
+    ds.where(:bar).foo.sql.must_equal 'SELECT DISTINCT ON (baz) * FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a grep method" do
+    @db.extend_datasets{grep :foo, :baz, 'quux%'}
+    ds.foo.sql.must_equal 'SELECT * FROM items WHERE ((baz LIKE \'quux%\' ESCAPE \'\\\'))'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE (bar AND ((baz LIKE \'quux%\' ESCAPE \'\\\')))'
+  end
+
+  it "should have dataset_module support a group method" do
+    @db.extend_datasets{group :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT * FROM items GROUP BY baz'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a group_and_count method" do
+    @db.extend_datasets{group_and_count :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT baz, count(*) AS count FROM items GROUP BY baz'
+    ds.where(:bar).foo.sql.must_equal 'SELECT baz, count(*) AS count FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a group_append method" do
+    @db.extend_datasets{group_append :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT * FROM items GROUP BY baz'
+    ds.group(:bar).foo.sql.must_equal 'SELECT * FROM items GROUP BY bar, baz'
+  end
+
+  it "should have dataset_module support a limit method" do
+    @db.extend_datasets{limit :foo, 1}
+    ds.foo.sql.must_equal 'SELECT * FROM items LIMIT 1'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar LIMIT 1'
+  end
+
+  it "should have dataset_module support a offset method" do
+    @db.extend_datasets{offset :foo, 1}
+    ds.foo.sql.must_equal 'SELECT * FROM items OFFSET 1'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar OFFSET 1'
+  end
+
+  it "should have dataset_module support a order method" do
+    @db.extend_datasets{order(:foo){:baz}}
+    ds.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar ORDER BY baz'
+  end
+
+  it "should have dataset_module support a order_append method" do
+    @db.extend_datasets{order_append :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    ds.order(:bar).foo.sql.must_equal 'SELECT * FROM items ORDER BY bar, baz'
+  end
+
+  it "should have dataset_module support a order_prepend method" do
+    @db.extend_datasets{order_prepend :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    ds.order(:bar).foo.sql.must_equal 'SELECT * FROM items ORDER BY baz, bar'
+  end
+
+  it "should have dataset_module support a reverse method" do
+    @db.extend_datasets{reverse(:foo){:baz}}
+    ds.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz DESC'
+    ds.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar ORDER BY baz DESC'
+  end
+
+  it "should have dataset_module support a select method" do
+    @db.extend_datasets{select :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT baz FROM items'
+    ds.where(:bar).foo.sql.must_equal 'SELECT baz FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_all method" do
+    @db.extend_datasets{select_all :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT baz.* FROM items'
+    ds.where(:bar).foo.sql.must_equal 'SELECT baz.* FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_append method" do
+    @db.extend_datasets{select_append :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT *, baz FROM items'
+    ds.where(:bar).foo.sql.must_equal 'SELECT *, baz FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_group method" do
+    @db.extend_datasets{select_group :foo, :baz}
+    ds.foo.sql.must_equal 'SELECT baz FROM items GROUP BY baz'
+    ds.where(:bar).foo.sql.must_equal 'SELECT baz FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a server method" do
+    @db.extend_datasets{server :foo, :baz}
+    ds.foo.opts[:server].must_equal :baz
+    ds.where(:bar).foo.opts[:server].must_equal :baz
+  end
+end
+
 describe "Database#disconnect_connection" do
   it "should call close on the connection" do
     o = Object.new
@@ -565,7 +595,7 @@ describe "Database#run" do
   end
   
   it "should return nil" do
-    @db.run("DELETE FROM items").must_equal nil
+    @db.run("DELETE FROM items").must_be_nil
   end
   
   it "should accept options passed to execute_ddl" do
@@ -598,7 +628,7 @@ end
 describe "Database#synchronize" do
   before do
     @db = Sequel::Database.new(:max_connections => 1)
-    meta_def(@db, :connect){|c| 12345}
+    @db.define_singleton_method(:connect){|c| 12345}
   end
   
   it "should wrap the supplied block in pool.hold" do
@@ -609,7 +639,7 @@ describe "Database#synchronize" do
     c1.must_equal 12345
     t2 = Thread.new{@db.synchronize{|c| c2 = c; q2.push nil}}
     @db.pool.available_connections.must_be :empty?
-    c2.must_equal nil
+    c2.must_be_nil
     q1.push nil
     q.pop
     q2.pop
@@ -623,7 +653,7 @@ describe "Database#test_connection" do
   before do
     @db = Sequel::Database.new
     pr = proc{@test = rand(100)}
-    meta_def(@db, :connect){|c| pr.call}
+    @db.define_singleton_method(:connect){|c| pr.call}
   end
   
   it "should attempt to get a connection" do
@@ -669,7 +699,7 @@ DatabaseTransactionSpecs = shared_description do
   end
   
   it "should support transaction isolation levels" do
-    meta_def(@db, :supports_transaction_isolation_levels?){true}
+    @db.define_singleton_method(:supports_transaction_isolation_levels?){true}
     [:uncommitted, :committed, :repeatable, :serializable].each do |l|
       @db.transaction(:isolation=>l){@db.run "DROP TABLE #{l}"}
     end
@@ -680,7 +710,7 @@ DatabaseTransactionSpecs = shared_description do
   end
 
   it "should allow specifying a default transaction isolation level" do
-    meta_def(@db, :supports_transaction_isolation_levels?){true}
+    @db.define_singleton_method(:supports_transaction_isolation_levels?){true}
     [:uncommitted, :committed, :repeatable, :serializable].each do |l|
       @db.transaction_isolation_level = l
       @db.transaction{@db.run "DROP TABLE #{l}"}
@@ -771,8 +801,8 @@ DatabaseTransactionSpecs = shared_description do
   
   it "should handle errors when sending BEGIN" do
     ec = Class.new(StandardError)
-    meta_def(@db, :database_error_classes){[ec]}
-    meta_def(@db, :log_connection_execute){|c, sql| sql =~ /BEGIN/ ? raise(ec, 'bad') : super(c, sql)}
+    @db.define_singleton_method(:database_error_classes){[ec]}
+    @db.define_singleton_method(:log_connection_execute){|c, sql| sql =~ /BEGIN/ ? raise(ec, 'bad') : super(c, sql)}
     begin
       @db.transaction{@db.execute 'DROP TABLE test;'}
     rescue Sequel::DatabaseError => e
@@ -784,8 +814,8 @@ DatabaseTransactionSpecs = shared_description do
   
   it "should handle errors when sending COMMIT" do
     ec = Class.new(StandardError)
-    meta_def(@db, :database_error_classes){[ec]}
-    meta_def(@db, :log_connection_execute){|c, sql| sql =~ /COMMIT/ ? raise(ec, 'bad') : super(c, sql)}
+    @db.define_singleton_method(:database_error_classes){[ec]}
+    @db.define_singleton_method(:log_connection_execute){|c, sql| sql =~ /COMMIT/ ? raise(ec, 'bad') : super(c, sql)}
     begin
       @db.transaction{@db.execute 'DROP TABLE test;'}
     rescue Sequel::DatabaseError => e
@@ -797,13 +827,25 @@ DatabaseTransactionSpecs = shared_description do
   
   it "should raise original exception if there is an exception raised when rolling back" do
     ec = Class.new(StandardError)
-    meta_def(@db, :database_error_classes){[ec]}
-    meta_def(@db, :log_connection_execute){|c, sql| sql =~ /ROLLBACK/ ? raise(ec, 'bad') : super(c, sql)}
+    @db.define_singleton_method(:database_error_classes){[ec]}
+    @db.define_singleton_method(:log_connection_execute){|c, sql| sql =~ /ROLLBACK/ ? raise(ec, 'bad') : super(c, sql)}
     begin
       @db.transaction{raise ArgumentError, 'asdf'}
     rescue => e
     end
     e.must_be_kind_of(ArgumentError)
+    @db.sqls.must_equal ['BEGIN']
+  end
+  
+  it "should raise original exception if there is an exception raised when rolling back when using :rollback=>:always" do
+    ec = Class.new(StandardError)
+    @db.define_singleton_method(:database_error_classes){[ec]}
+    @db.define_singleton_method(:log_connection_execute){|c, sql| sql =~ /ROLLBACK/ ? raise(ec, 'bad') : super(c, sql)}
+    begin
+      @db.transaction(:rollback=>:always){}
+    rescue => e
+    end
+    e.must_be_kind_of(ec)
     @db.sqls.must_equal ['BEGIN']
   end
   
@@ -834,8 +876,37 @@ DatabaseTransactionSpecs = shared_description do
     @db.in_transaction?.must_equal false
   end
   
+  it "should have rollback_checker return a proc which returns whether the transaction was rolled back" do
+    proc{@db.rollback_checker}.must_raise Sequel::Error
+    proc{@db.transaction(:server=>:test){@db.rollback_checker}}.must_raise Sequel::Error
+
+    rbc = nil
+    @db.transaction do 
+      rbc = @db.rollback_checker
+      rbc.call.must_be_nil
+    end
+    rbc.call.must_equal false
+
+    @db.transaction(:rollback=>:always) do 
+      rbc = @db.rollback_checker
+      rbc.call.must_be_nil
+    end
+    rbc.call.must_equal true
+
+    proc do
+      @db.transaction do 
+        rbc = @db.rollback_checker
+        raise
+      end
+    end.must_raise RuntimeError
+    rbc.call.must_equal true
+
+    @db.transaction(:server=>:test){rbc = @db.rollback_checker(:server=>:test)}
+    rbc.call.must_equal false
+  end
+  
   it "should return nil if Sequel::Rollback is called in the transaction" do
-    @db.transaction{raise Sequel::Rollback}.must_equal nil
+    @db.transaction{raise Sequel::Rollback}.must_be_nil
   end
   
   it "should reraise Sequel::Rollback errors when using :rollback=>:reraise option is given" do
@@ -850,7 +921,7 @@ DatabaseTransactionSpecs = shared_description do
   it "should always rollback if :rollback=>:always option is given" do
     proc {@db.transaction(:rollback=>:always){raise ArgumentError}}.must_raise(ArgumentError)
     @db.sqls.must_equal ['BEGIN', 'ROLLBACK']
-    @db.transaction(:rollback=>:always){raise Sequel::Rollback}.must_equal nil
+    @db.transaction(:rollback=>:always){raise Sequel::Rollback}.must_be_nil
     @db.sqls.must_equal ['BEGIN', 'ROLLBACK']
     @db.transaction(:rollback=>:always){1}.must_equal 1
     @db.sqls.must_equal ['BEGIN', 'ROLLBACK']
@@ -861,10 +932,10 @@ DatabaseTransactionSpecs = shared_description do
   end
 
   it "should raise database errors when commiting a transaction as Sequel::DatabaseError" do
-    meta_def(@db, :commit_transaction){raise ArgumentError}
+    @db.define_singleton_method(:commit_transaction){raise ArgumentError}
     lambda{@db.transaction{}}.must_raise(ArgumentError)
 
-    meta_def(@db, :database_error_classes){[ArgumentError]}
+    @db.define_singleton_method(:database_error_classes){[ArgumentError]}
     lambda{@db.transaction{}}.must_raise(Sequel::DatabaseError)
   end
   
@@ -889,7 +960,7 @@ DatabaseTransactionSpecs = shared_description do
     tr.must_be :empty?
   end
 
-  it "should correctly handle nested transacation use with separate shards" do
+  it "should correctly handle nested transaction use with separate shards" do
     @db.transaction do |c1|
       @db.transaction(:server=>:test) do |c2|
         c1.wont_equal c2
@@ -991,13 +1062,13 @@ DatabaseTransactionSpecs = shared_description do
   end
 
   it "should raise an error if you attempt to use after_commit inside a prepared transaction" do
-    meta_def(@db, :supports_prepared_transactions?){true}
+    @db.define_singleton_method(:supports_prepared_transactions?){true}
     proc{@db.transaction(:prepare=>'XYZ'){@db.after_commit{@db.execute('foo')}}}.must_raise(Sequel::Error)
     @db.sqls.must_equal ['BEGIN', 'ROLLBACK']
   end
 
   it "should raise an error if you attempt to use after_rollback inside a prepared transaction" do
-    meta_def(@db, :supports_prepared_transactions?){true}
+    @db.define_singleton_method(:supports_prepared_transactions?){true}
     proc{@db.transaction(:prepare=>'XYZ'){@db.after_rollback{@db.execute('foo')}}}.must_raise(Sequel::Error)
     @db.sqls.must_equal ['BEGIN', 'ROLLBACK']
   end
@@ -1063,13 +1134,13 @@ describe "Database#transaction with savepoint support" do
   end
 
   it "should raise an error if you attempt to use after_commit inside a savepoint in a prepared transaction" do
-    meta_def(@db, :supports_prepared_transactions?){true}
+    @db.define_singleton_method(:supports_prepared_transactions?){true}
     proc{@db.transaction(:prepare=>'XYZ'){@db.transaction(:savepoint=>true){@db.after_commit{@db.execute('foo')}}}}.must_raise(Sequel::Error)
     @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1','ROLLBACK TO SAVEPOINT autopoint_1', 'ROLLBACK']
   end
 
   it "should raise an error if you attempt to use after_rollback inside a savepoint in a prepared transaction" do
-    meta_def(@db, :supports_prepared_transactions?){true}
+    @db.define_singleton_method(:supports_prepared_transactions?){true}
     proc{@db.transaction(:prepare=>'XYZ'){@db.transaction(:savepoint=>true){@db.after_rollback{@db.execute('foo')}}}}.must_raise(Sequel::Error)
     @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1','ROLLBACK TO SAVEPOINT autopoint_1', 'ROLLBACK']
   end
@@ -1088,7 +1159,7 @@ end
 describe "Database#transaction without savepoint support" do
   before do
     @db = Sequel.mock(:servers=>{:test=>{}})
-    meta_def(@db, :supports_savepoints?){false}
+    @db.define_singleton_method(:supports_savepoints?){false}
   end
 
   it "should not create savepoint if inside a transaction when :savepoint=>:only is used" do
@@ -1129,7 +1200,7 @@ describe "Sequel.transaction" do
   end
   
   it "should handle Sequel::Rollback exceptions raised by the block to rollback on all databases" do
-    Sequel.transaction([@db1, @db2, @db3]){raise Sequel::Rollback}.must_equal nil
+    Sequel.transaction([@db1, @db2, @db3]){raise Sequel::Rollback}.must_be_nil
     @sqls.must_equal ['BEGIN -- 1', 'BEGIN -- 2', 'BEGIN -- 3', 'ROLLBACK -- 3', 'ROLLBACK -- 2', 'ROLLBACK -- 1']
   end
   
@@ -1252,11 +1323,11 @@ describe "Database#transaction with savepoints" do
   end
   
   it "should raise database errors when commiting a transaction as Sequel::DatabaseError" do
-    meta_def(@db, :commit_transaction){raise ArgumentError}
+    @db.define_singleton_method(:commit_transaction){raise ArgumentError}
     lambda{@db.transaction{}}.must_raise(ArgumentError)
     lambda{@db.transaction{@db.transaction(:savepoint=>true){}}}.must_raise(ArgumentError)
 
-    meta_def(@db, :database_error_classes){[ArgumentError]}
+    @db.define_singleton_method(:database_error_classes){[ArgumentError]}
     lambda{@db.transaction{}}.must_raise(Sequel::DatabaseError)
     lambda{@db.transaction{@db.transaction(:savepoint=>true){}}}.must_raise(Sequel::DatabaseError)
   end
@@ -1264,7 +1335,7 @@ end
 
 describe "A Database adapter with a scheme" do
   before do
-    require 'sequel/adapters/mock'
+    require_relative '../../lib/sequel/adapters/mock'
     @ccc = Class.new(Sequel::Mock::Database)
     @ccc.send(:set_adapter_scheme, :ccc)
   end
@@ -1322,7 +1393,7 @@ describe "A Database adapter with a scheme" do
     Sequel.send(:def_adapter_method, :ccc)
     Sequel.ccc('db', :host=>'localhost', &p).must_equal returnValue
     @ccc::DISCONNECTS.must_equal [z, y, x]
-    class << Sequel; remove_method(:ccc) end
+    Sequel.singleton_class.send(:remove_method, :ccc)
   end
 
   it "should be accessible through Sequel.<adapter>" do
@@ -1347,7 +1418,7 @@ describe "A Database adapter with a scheme" do
     c = Sequel.ccc(:database => 'mydb', :host => 'localhost')
     c.must_be_kind_of(@ccc)
     c.opts.values_at(:adapter, :database, :host, :adapter_class).must_equal [:ccc, 'mydb', 'localhost', @ccc]
-    class << Sequel; remove_method(:ccc) end
+    Sequel.singleton_class.send(:remove_method, :ccc)
   end
   
   it "should be accessible through Sequel.connect with options" do
@@ -1436,13 +1507,13 @@ end
 
 describe "Sequel::Database.load_adapter" do
   it "should not raise an error if subadapter does not exist" do
-    Sequel::Database.load_adapter(:foo, :subdir=>'bar').must_equal nil
+    Sequel::Database.load_adapter(:foo, :subdir=>'bar').must_be_nil
   end
 end
 
 describe "A single threaded database" do
   after do
-    Sequel::Database.single_threaded = false
+    Sequel.single_threaded = false
   end
   
   it "should use a SingleConnectionPool instead of a ConnectionPool" do
@@ -1455,14 +1526,9 @@ describe "A single threaded database" do
     db.pool.must_be_kind_of(Sequel::SingleConnectionPool)
   end
   
-  it "should be constructable using Database.single_threaded = true" do
-    Sequel::Database.single_threaded = true
-    db = Sequel::Database.new{123}
-    db.pool.must_be_kind_of(Sequel::SingleConnectionPool)
-  end
-
   it "should be constructable using Sequel.single_threaded = true" do
     Sequel.single_threaded = true
+    Sequel.single_threaded.must_equal true
     db = Sequel::Database.new{123}
     db.pool.must_be_kind_of(Sequel::SingleConnectionPool)
   end
@@ -1472,7 +1538,7 @@ describe "A single threaded database" do
   before do
     conn = 1234567
     @db = Sequel::Database.new(:single_threaded => true)
-    meta_def(@db, :connect) do |c|
+    @db.define_singleton_method(:connect) do |c|
       conn += 1
     end
   end
@@ -1493,21 +1559,19 @@ describe "A single threaded database" do
   end
   
   it "should convert an Exception on connection into a DatabaseConnectionError" do
-    db = Sequel::Database.new(:single_threaded => true, :servers=>{})
-    def db.connect(*) raise Exception end
+    db = Class.new(Sequel::Database){def connect(*) raise Exception end}.new(:single_threaded => true, :servers=>{}, :test=>false)
     proc {db.pool.hold {|c|}}.must_raise(Sequel::DatabaseConnectionError)
   end
   
   it "should raise a DatabaseConnectionError if the connection proc returns nil" do
-    db = Sequel.mock(:single_threaded => true, :servers=>{})
-    def db.connect(*) end
+    db = Class.new(Sequel::Database){def connect(*) end}.new(:single_threaded => true, :servers=>{}, :test=>false)
     proc {db.pool.hold {|c|}}.must_raise(Sequel::DatabaseConnectionError)
   end
 end
 
 describe "A database" do
   after do
-    Sequel::Database.single_threaded = false
+    Sequel.single_threaded = false
   end
   
   it "should have single_threaded? respond to true if in single threaded mode" do
@@ -1520,7 +1584,7 @@ describe "A database" do
     db = Sequel::Database.new
     db.wont_be :single_threaded?
     
-    Sequel::Database.single_threaded = true
+    Sequel.single_threaded = true
     
     db = Sequel::Database.new{123}
     db.must_be :single_threaded?
@@ -1588,7 +1652,7 @@ describe "Database#fetch" do
     ds.select_sql.must_equal 'select * from xyz'
     ds.sql.must_equal 'select * from xyz'
     
-    ds.filter!{price.sql_number < 100}
+    ds = ds.where{price.sql_number < 100}
     ds.select_sql.must_equal 'select * from xyz'
     ds.sql.must_equal 'select * from xyz'
   end
@@ -1620,11 +1684,11 @@ describe "Database#inspect" do
   end
 
   it "should include the class name and the connection options if an options hash was given" do
-    Sequel.connect(:adapter=>:mock).inspect.must_match(/#<Sequel::Mock::Database: \{:adapter=>:mock\}>/)
+    Sequel.connect(:adapter=>:mock).inspect.must_equal '#<Sequel::Mock::Database: {:adapter=>:mock}>'
   end
 
   it "should include the class name, uri, and connection options if uri and options hash was given" do
-    Sequel.connect('mock://foo', :database=>'bar').inspect.must_match(/#<Sequel::Mock::Database: "mock:\/\/foo" \{:database=>"bar"\}>/)
+    Sequel.connect('mock://foo', :database=>'bar').inspect.must_equal '#<Sequel::Mock::Database: "mock://foo" {:database=>"bar"}>'
   end
 end
 
@@ -1734,6 +1798,10 @@ describe "Database#add_servers" do
     @db.synchronize(:server1){|c| c.opts[:host].must_equal 8}
     @db.synchronize(:server2){|c| c.opts[:host].must_equal 4}
   end
+
+  it "should raise error for unsharded pool" do
+    proc{Sequel.mock.add_servers(:server1=>{})}.must_raise Sequel::Error
+  end
 end
 
 describe "Database#remove_servers" do
@@ -1784,66 +1852,12 @@ describe "Database#remove_servers" do
       c1.opts[:host].must_equal 1
     end
   end
-end
 
-describe "Database#each_server with do/jdbc adapter connection string without :adapter option" do
-  it "should yield a separate database object for each server" do
-    require 'sequel/adapters/mock'
-    klass = Class.new(Sequel::Database)
-    def klass.adapter_class(v)
-      raise unless v == :jdbc
-      Sequel::Mock::Database
-    end
-    @db = klass.connect('jdbc:blah:', :host=>1, :database=>2, :servers=>{:server1=>{:host=>3}})
-
-    hosts = []
-    @db.each_server do |db|
-      db.must_be_kind_of(Sequel::Database)
-      db.wont_equal @db
-      db.opts[:adapter_class].must_equal Sequel::Mock::Database
-      db.opts[:database].must_equal 2
-      hosts << db.opts[:host]
-    end
-    hosts.sort.must_equal [1, 3]
-  end
-
-  it "should raise if not given a block" do
-    proc{Sequel.mock.each_server}.must_raise(Sequel::Error)
+  it "should raise error for unsharded pool" do
+    proc{Sequel.mock.remove_servers(:server1)}.must_raise Sequel::Error
   end
 end
 
-describe "Database#each_server" do
-  before do
-    @db = Sequel.mock(:host=>1, :database=>2, :servers=>{:server1=>{:host=>3}, :server2=>{:host=>4}})
-  end
-
-  it "should yield a separate database object for each server" do
-    hosts = []
-    @db.each_server do |db|
-      db.must_be_kind_of(Sequel::Database)
-      db.wont_equal @db
-      db.opts[:adapter].must_equal :mock
-      db.opts[:database].must_equal 2
-      hosts << db.opts[:host]
-    end
-    hosts.sort.must_equal [1, 3, 4]
-  end
-
-  it "should disconnect and remove entry from Sequel::DATABASES after use" do
-    dbs = []
-    dcs = []
-    @db.each_server do |db|
-      dbs << db
-      Sequel::DATABASES.must_include(db)
-      meta_def(db, :disconnect){dcs << db}
-    end
-    dbs.each do |db|
-      Sequel::DATABASES.wont_include(db)
-    end
-    dbs.must_equal dcs
-  end
-end
-  
 describe "Database#raise_error" do
   before do
     @db = Sequel.mock
@@ -1870,8 +1884,9 @@ describe "Database#raise_error" do
     def @db.database_error_regexps
       {/foo/ => Sequel::DatabaseDisconnectError, /bar/ => Sequel::ConstraintViolation}
     end
-    proc{@db.send(:raise_error, Interrupt.new('foo'))}.must_raise(Sequel::DatabaseDisconnectError)
-    proc{@db.send(:raise_error, Interrupt.new('bar'))}.must_raise(Sequel::ConstraintViolation)
+    e = Class.new(StandardError)
+    proc{@db.send(:raise_error, e.new('foo'))}.must_raise(Sequel::DatabaseDisconnectError)
+    proc{@db.send(:raise_error, e.new('bar'))}.must_raise(Sequel::ConstraintViolation)
   end
 end
 
@@ -1920,7 +1935,7 @@ describe "Database#typecast_value" do
     @db.typecast_value(:boolean, '1').must_equal true
     @db.typecast_value(:boolean, 't').must_equal true
     @db.typecast_value(:boolean, 'true').must_equal true
-    @db.typecast_value(:boolean, '').must_equal nil
+    @db.typecast_value(:boolean, '').must_be_nil
   end
 
   it "should typecast date values to Date" do
@@ -1979,9 +1994,9 @@ describe "Database#typecast_value" do
     t2 = Time.mktime(2011, 1, 2, 3, 4, 5, 500000) # Local Time
     t3 = Time.utc(2011, 1, 2, 3, 4, 5, 500000) - (t - t2) # Local Time in UTC Time
     t4 = Time.mktime(2011, 1, 2, 3, 4, 5, 500000) + (t - t2) # UTC Time in Local Time
-    secs = defined?(Rational) ? Rational(11, 2) : 5.5
-    r1 = defined?(Rational) ? Rational(t2.utc_offset, 86400) : t2.utc_offset/86400.0
-    r2 = defined?(Rational) ? Rational((t - t2).to_i, 86400) : (t - t2).to_i/86400.0
+    secs = Rational(11, 2)
+    r1 = Rational(t2.utc_offset, 86400)
+    r2 = Rational((t - t2).to_i, 86400)
     dt = DateTime.civil(2011, 1, 2, 3, 4, secs)
     dt2 = DateTime.civil(2011, 1, 2, 3, 4, secs, r1)
     dt3 = DateTime.civil(2011, 1, 2, 3, 4, secs) - r2
@@ -2120,8 +2135,8 @@ describe "Database#typecast_value" do
 
       Sequel.datetime_class = DateTime
       @db.typecast_value(:datetime, [2011, 10, 11, 12, 13, 14]).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14)
-      @db.typecast_value(:datetime, [2011, 10, 11, 12, 13, 14, 500000000]).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5))
-      @db.typecast_value(:datetime, [2011, 10, 11, 12, 13, 14, 500000000, (defined?(Rational) ? Rational(1, 2) : 0.5)]).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5), (defined?(Rational) ? Rational(1, 2) : 0.5))
+      @db.typecast_value(:datetime, [2011, 10, 11, 12, 13, 14, 500000000]).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2))
+      @db.typecast_value(:datetime, [2011, 10, 11, 12, 13, 14, 500000000, Rational(1, 2)]).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), Rational(1, 2))
     ensure
       Sequel.datetime_class = Time
     end
@@ -2136,13 +2151,13 @@ describe "Database#typecast_value" do
 
       Sequel.datetime_class = DateTime
       @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14)
-      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5))
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2))
       @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14)
-      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5))
-      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :offset=>(defined?(Rational) ? Rational(1, 2) : 0.5)).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, (defined?(Rational) ? Rational(1, 2) : 0.5))
-      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000, :offset=>(defined?(Rational) ? Rational(1, 2) : 0.5)).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5), (defined?(Rational) ? Rational(1, 2) : 0.5))
-      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'offset'=>(defined?(Rational) ? Rational(1, 2) : 0.5)).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, (defined?(Rational) ? Rational(1, 2) : 0.5))
-      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000, 'offset'=>(defined?(Rational) ? Rational(1, 2) : 0.5)).must_equal DateTime.civil(2011, 10, 11, 12, 13, (defined?(Rational) ? Rational(29, 2) : 14.5), (defined?(Rational) ? Rational(1, 2) : 0.5))
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2))
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :offset=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, Rational(1, 2))
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000, :offset=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), Rational(1, 2))
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'offset'=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, Rational(1, 2))
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000, 'offset'=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), Rational(1, 2))
     ensure
       Sequel.datetime_class = Time
     end
@@ -2204,12 +2219,37 @@ describe "Database#typecast_value" do
     end
   end
 
+  it "should have an underlying exception class available at cause" do
+    begin
+      @db.typecast_value(:date, 'a')
+      true.must_equal false
+    rescue Sequel::InvalidValue => e
+      e.cause.must_be_kind_of(ArgumentError)
+    end
+  end if RUBY_VERSION >= '2.1'
+
+  it "should have an underlying exception class available at cause when using nested exceptions" do
+    begin
+      begin
+        raise ArgumentError
+      rescue => e1
+        begin
+          raise RuntimeError
+        rescue
+          @db.send(:raise_error, e1)
+        end
+      end
+    rescue Sequel::DatabaseError => e
+      e.cause.must_be_kind_of(ArgumentError)
+    end
+  end if RUBY_VERSION >= '2.1'
+
   it "should include underlying exception class in #inspect" do
     begin
       @db.typecast_value(:date, 'a')
       true.must_equal false
     rescue Sequel::InvalidValue => e
-      e.inspect.must_match(/\A#<Sequel::InvalidValue: ArgumentError: .*>\z/)
+      e.inspect.must_equal '#<Sequel::InvalidValue: ArgumentError: invalid date>'
     end
   end
 end
@@ -2357,8 +2397,8 @@ describe "Database#supports_savepoints_in_prepared_transactions?" do
 
   it "should be true if both savepoints and prepared transactions are supported" do
     db = Sequel::Database.new
-    meta_def(db, :supports_savepoints?){true}
-    meta_def(db, :supports_prepared_transactions?){true}
+    db.define_singleton_method(:supports_savepoints?){true}
+    db.define_singleton_method(:supports_prepared_transactions?){true}
     db.supports_savepoints_in_prepared_transactions?.must_equal true
   end
 end
@@ -2375,37 +2415,11 @@ describe "Database#supports_transaction_isolation_levels?" do
   end
 end
 
-describe "Database#input_identifier_meth" do
-  it "should be the input_identifer method of a default dataset for this database" do
-    db = Sequel::Database.new
-    db.send(:input_identifier_meth).call(:a).must_equal 'a'
-    db.identifier_input_method = :upcase
-    db.send(:input_identifier_meth).call(:a).must_equal 'A'
-  end
-end
-
-describe "Database#output_identifier_meth" do
-  it "should be the output_identifer method of a default dataset for this database" do
-    db = Sequel::Database.new
-    db.send(:output_identifier_meth).call('A').must_equal :A
-    db.identifier_output_method = :downcase
-    db.send(:output_identifier_meth).call('A').must_equal :a
-  end
-end
-
-describe "Database#metadata_dataset" do
-  it "should be a dataset with the default settings for identifier_input_method and identifier_output_method" do
-    ds = Sequel::Database.new.send(:metadata_dataset)
-    ds.literal(:a).must_equal 'A'
-    ds.send(:output_identifier, 'A').must_equal :a
-  end
-end
-
 describe "Database#column_schema_to_ruby_default" do
   it "should handle converting many default formats" do
     db = Sequel::Database.new
     p = lambda{|d,t| db.send(:column_schema_to_ruby_default, d, t)}
-    p[nil, :integer].must_equal nil
+    p[nil, :integer].must_be_nil
     p[1, :integer].must_equal 1
     p['1', :integer].must_equal 1
     p['-1', :integer].must_equal(-1)
@@ -2441,7 +2455,7 @@ describe "Database#column_schema_to_ruby_default" do
     p["'2009-10-29T10:20:30-07:00'", :datetime].must_equal DateTime.parse('2009-10-29T10:20:30-07:00')
     p["'2009-10-29 10:20:30'", :datetime].must_equal DateTime.parse('2009-10-29 10:20:30')
     p["'10:20:30'", :time].must_equal Time.parse('10:20:30')
-    p["NaN", :float].must_equal nil
+    p["NaN", :float].must_be_nil
 
     db = Sequel.mock(:host=>'postgres')
     p["''::text", :string].must_equal ""
@@ -2504,26 +2518,29 @@ describe "Database extensions" do
     @db.extension(:foo).a.must_equal 1
   end
 
+  it "should not call the block multiple times if extension loaded more than once" do
+    @db.opts[:foo] = []
+    Sequel::Database.register_extension(:foo){|db| db.opts[:foo] << 1}
+    @db.extension(:foo).opts[:foo].must_equal [1]
+    @db.extension(:foo).opts[:foo].must_equal [1]
+  end
+
   it "should be able to register an extension with a block and have Database#extension call the block" do
-    @db.quote_identifiers = false
-    Sequel::Database.register_extension(:foo){|db| db.quote_identifiers = true}
-    @db.extension(:foo).quote_identifiers?.must_equal true
+    Sequel::Database.register_extension(:foo){|db| db.opts[:foo] = 1}
+    @db.extension(:foo).opts[:foo].must_equal 1
   end
 
   it "should be able to register an extension with a callable and Database#extension call the callable" do
-    @db.quote_identifiers = false
-    Sequel::Database.register_extension(:foo, proc{|db| db.quote_identifiers = true})
-    @db.extension(:foo).quote_identifiers?.must_equal true
+    Sequel::Database.register_extension(:foo, proc{|db| db.opts[:foo] = 1})
+    @db.extension(:foo).opts[:foo].must_equal 1
   end
 
   it "should be able to load multiple extensions in the same call" do
-    @db.quote_identifiers = false
-    @db.identifier_input_method = :downcase
-    Sequel::Database.register_extension(:foo, proc{|db| db.quote_identifiers = true})
-    Sequel::Database.register_extension(:bar, proc{|db| db.identifier_input_method = nil})
-    @db.extension(:foo, :bar)
-    @db.quote_identifiers?.must_equal true
-    @db.identifier_input_method.must_equal nil
+    a = []
+    Sequel::Database.register_extension(:foo, proc{|db| a << db.opts[:foo] = 1})
+    Sequel::Database.register_extension(:bar, proc{|db| a << db.opts[:bar] = 2})
+    @db.extension(:foo, :bar).opts.values_at(:foo, :bar).must_equal [1, 2]
+    a.must_equal [1, 2]
   end
 
   it "should return the receiver" do
@@ -2547,6 +2564,20 @@ describe "Database extensions" do
     @db.wont_respond_to(:b)
     Sequel.mock.a.must_equal 1
     Sequel.mock.b.must_equal 2
+  end
+
+  it "should be loadable via the :extensions Database option" do
+    Sequel::Database.register_extension(:a, Module.new{def a; 1; end})
+    Sequel::Database.register_extension(:b, Module.new{def b; 2; end})
+    Sequel.mock(:extensions=>:a).a.must_equal 1
+    db = Sequel.mock(:extensions=>'a,b')
+    db.a.must_equal 1
+    db.b.must_equal 2
+    db = Sequel.mock(:extensions=>[:a, :b])
+    db.a.must_equal 1
+    db.b.must_equal 2
+    proc{Sequel.mock(:extensions=>nil).a}.must_raise NoMethodError
+    proc{Sequel.mock(:extensions=>Object.new)}.must_raise Sequel::Error
   end
 end
 
@@ -2632,5 +2663,11 @@ describe "Database#execute_{dui,ddl,insert}" do
     @db.execute_ddl "SET foo"
     @db.execute_insert "INSERT INTO table DEFAULT VALUES"
     @db.sqls.must_equal ["DELETE FROM table", "SET foo", "INSERT INTO table DEFAULT VALUES"]
+  end
+end
+
+describe "Dataset identifier folding" do
+  it "should fold to uppercase by default, as per SQL" do
+    Sequel::Database.new.send(:folds_unquoted_identifiers_to_uppercase?).must_equal true
   end
 end

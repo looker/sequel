@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model, "associate" do
   it "should use explicit class if given a class, symbol, or string" do
@@ -118,7 +118,7 @@ describe Sequel::Model, "associate" do
       klass.association_reflection(:par)[:eager_block].call.must_equal 1
       klass.association_reflection(:par1s)[:limit].must_equal 10
       klass.association_reflection(:par1s)[:order].must_equal :b
-      klass.association_reflection(:par1s)[:block].must_equal nil
+      klass.association_reflection(:par1s)[:block].must_be_nil
       klass.association_reflection(:par2s)[:after_load].length.must_equal 1
       klass.association_reflection(:par2s)[:order].must_equal :c
       klass.association_reflection(:par2s)[:block].call.must_equal 3
@@ -177,9 +177,10 @@ describe Sequel::Model, "associate" do
   end
 
   it "should not clear associations cache when saving with insert_select" do
-    ds = Sequel::Model.db[:c]
-    def ds.supports_insert_select?() true end
-    def ds.insert_select(*) {:id=>1} end
+    ds = Sequel::Model.db[:c].with_extend do
+      def supports_insert_select?; true end
+      def insert_select(*) {:id=>1} end
+    end
     c = Class.new(Sequel::Model(ds))
     c.many_to_one :c
     o = c.new
@@ -297,7 +298,7 @@ describe Sequel::Model, "many_to_one" do
   
   it "should not issue query if not all keys have values" do
     @c2.many_to_one :parent, :class => @c2, :key=>[:id, :parent_id], :primary_key=>[:parent_id, :id]
-    @c2.new(:id => 1, :parent_id => nil).parent.must_equal nil
+    @c2.new(:id => 1, :parent_id => nil).parent.must_be_nil
     DB.sqls.must_equal []
   end
   
@@ -334,18 +335,18 @@ describe Sequel::Model, "many_to_one" do
 
   it "should return nil if key value is nil" do
     @c2.many_to_one :parent, :class => @c2
-    @c2.new(:id => 1).parent.must_equal nil
+    @c2.new(:id => 1).parent.must_be_nil
     DB.sqls.must_equal []
   end
 
   it "should cache negative lookup" do
     @c2.many_to_one :parent, :class => @c2
-    @c2.dataset._fetch = []
+    @c2.dataset = @c2.dataset.with_fetch([])
     d = @c2.new(:id => 1, :parent_id=>555)
     DB.sqls.must_equal []
-    d.parent.must_equal nil
+    d.parent.must_be_nil
     DB.sqls.must_equal ['SELECT * FROM nodes WHERE id = 555']
-    d.parent.must_equal nil
+    d.parent.must_be_nil
     DB.sqls.must_equal []
   end
 
@@ -410,8 +411,8 @@ describe Sequel::Model, "many_to_one" do
 
     d = @c2.load(:id => 1)
     d.parent_id = 234
-    d.associations[:parent].must_equal nil
-    @c2.dataset._fetch = {:id=>234}
+    d.associations[:parent].must_be_nil
+    @c2.dataset = @c2.dataset.with_fetch(:id=>234)
     e = d.parent 
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE id = 234"]
     d.associations[:parent].must_equal e
@@ -422,7 +423,7 @@ describe Sequel::Model, "many_to_one" do
 
     d = @c2.create(:id => 1)
     DB.reset
-    d.associations[:parent].must_equal nil
+    d.associations[:parent].must_be_nil
     d.parent = @c2.new(:id => 234)
     e = d.parent 
     d.associations[:parent].must_equal e
@@ -446,11 +447,7 @@ describe Sequel::Model, "many_to_one" do
     DB.reset
     d.parent_id = 234
     d.associations[:parent] = 42
-    d.parent(true).wont_equal 42 
-    DB.sqls.must_equal ["SELECT * FROM nodes WHERE id = 234"]
     d.parent(:reload=>true).wont_equal 42 
-    DB.sqls.must_equal ["SELECT * FROM nodes WHERE id = 234"]
-    d.parent(Object.new).wont_equal 42 
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE id = 234"]
   end
   
@@ -461,7 +458,7 @@ describe Sequel::Model, "many_to_one" do
     DB.reset
     d.parent_id = 234
     d.associations[:parent] = 42
-    d.parent(proc{|ds| ds.filter{name > 'M'}}).wont_equal 42 
+    d.parent{|ds| ds.where{name > 'M'}}.wont_equal 42 
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE ((nodes.id = 234) AND (name > 'M')) LIMIT 1"]
   end
   
@@ -479,7 +476,7 @@ describe Sequel::Model, "many_to_one" do
   it "should have the setter add to the reciprocal one_to_many cached association array if it exists" do
     @c2.many_to_one :parent, :class => @c2
     @c2.one_to_many :children, :class => @c2, :key=>:parent_id
-    @c2.dataset._fetch = []
+    @c2.dataset = @c2.dataset.with_fetch([])
 
     d = @c2.new(:id => 1)
     e = @c2.new(:id => 2)
@@ -507,13 +504,13 @@ describe Sequel::Model, "many_to_one" do
     d.parent = e
     e.child.must_equal d
     d.parent = nil
-    e.child.must_equal nil
+    e.child.must_be_nil
     d.parent = e
     e.child.must_equal d
 
     f = @c2.new(:id => 3)
     d.parent = nil
-    e.child.must_equal nil
+    e.child.must_be_nil
     e.associations[:child] = f
     d.parent = e
     e.child.must_equal d
@@ -522,7 +519,7 @@ describe Sequel::Model, "many_to_one" do
   it "should have the setter remove the object from the previous associated object's reciprocal one_to_many cached association array if it exists" do
     @c2.many_to_one :parent, :class => @c2
     @c2.one_to_many :children, :class => @c2, :key=>:parent_id
-    @c2.dataset._fetch = []
+    @c2.dataset = @c2.dataset.with_fetch([])
 
     d = @c2.new(:id => 1)
     e = @c2.new(:id => 2)
@@ -555,9 +552,10 @@ describe Sequel::Model, "many_to_one" do
   end
 
   it "should get all matching records and only return the first if :key option is set to nil" do
+    @c2.dataset = @c2.dataset.with_fetch([{:id=>1, :parent_id=>0, :par_parent_id=>3, :blah=>4, :children_id=>2, :children_parent_id=>1, :children_par_parent_id=>5, :children_blah=>6}, {}])
+    @c2.dataset.columns(:id, :parent_id, :par_parent_id, :blah)
     @c2.one_to_many :children, :class => @c2, :key=>:parent_id
     @c2.many_to_one :first_grand_parent, :class => @c2, :key=>nil, :eager_graph=>:children, :dataset=>proc{model.filter(:children_id=>parent_id)}
-    @c2.dataset.columns(:id, :parent_id, :par_parent_id, :blah)._fetch = [{:id=>1, :parent_id=>0, :par_parent_id=>3, :blah=>4, :children_id=>2, :children_parent_id=>1, :children_par_parent_id=>5, :children_blah=>6}, {}]
     p = @c2.new(:parent_id=>2)
     fgp = p.first_grand_parent
     DB.sqls.must_equal ["SELECT nodes.id, nodes.parent_id, nodes.par_parent_id, nodes.blah, children.id AS children_id, children.parent_id AS children_parent_id, children.par_parent_id AS children_par_parent_id, children.blah AS children_blah FROM nodes LEFT OUTER JOIN nodes AS children ON (children.parent_id = nodes.id) WHERE (children_id = 2)"]
@@ -567,31 +565,31 @@ describe Sequel::Model, "many_to_one" do
 
   it "should not create the setter method if :read_only option is used" do
     @c2.many_to_one :parent, :class => @c2, :read_only=>true
-    @c2.instance_methods.collect{|x| x.to_s}.must_include('parent')
-    @c2.instance_methods.collect{|x| x.to_s}.wont_include('parent=')
+    @c2.instance_methods.must_include(:parent)
+    @c2.instance_methods.wont_include(:parent=)
   end
 
   it "should not add associations methods directly to class" do
     @c2.many_to_one :parent, :class => @c2
-    @c2.instance_methods.collect{|x| x.to_s}.must_include('parent')
-    @c2.instance_methods.collect{|x| x.to_s}.must_include('parent=')
-    @c2.instance_methods(false).collect{|x| x.to_s}.wont_include('parent')
-    @c2.instance_methods(false).collect{|x| x.to_s}.wont_include('parent=')
+    @c2.instance_methods.must_include(:parent)
+    @c2.instance_methods.must_include(:parent=)
+    @c2.instance_methods(false).wont_include(:parent)
+    @c2.instance_methods(false).wont_include(:parent=)
   end
 
   it "should add associations methods to the :methods_module option" do
     m = Module.new
     @c2.many_to_one :parent, :class => @c2, :methods_module=>m
-    m.instance_methods.collect{|x| x.to_s}.must_include('parent')
-    m.instance_methods.collect{|x| x.to_s}.must_include('parent=')
-    @c2.instance_methods.collect{|x| x.to_s}.wont_include('parent')
-    @c2.instance_methods.collect{|x| x.to_s}.wont_include('parent=')
+    m.instance_methods.must_include(:parent)
+    m.instance_methods.must_include(:parent=)
+    @c2.instance_methods.wont_include(:parent)
+    @c2.instance_methods.wont_include(:parent=)
   end
 
   it "should add associations methods directly to class if :methods_module is the class itself" do
     @c2.many_to_one :parent, :class => @c2, :methods_module=>@c2
-    @c2.instance_methods(false).collect{|x| x.to_s}.must_include('parent')
-    @c2.instance_methods(false).collect{|x| x.to_s}.must_include('parent=')
+    @c2.instance_methods(false).must_include(:parent)
+    @c2.instance_methods(false).must_include(:parent=)
   end
 
   it "should raise an error if trying to set a model object that doesn't have a valid primary key" do
@@ -603,7 +601,7 @@ describe Sequel::Model, "many_to_one" do
 
   it "should make the change to the foreign_key value inside a _association= method" do
     @c2.many_to_one :parent, :class => @c2
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_parent=")
+    @c2.private_instance_methods.must_include(:_parent=)
     p = @c2.new
     c = @c2.load(:id=>123)
     def p._parent=(x)
@@ -655,7 +653,7 @@ describe Sequel::Model, "many_to_one" do
       def al(v)
         model::Foo << v.pk
       end
-      dataset._fetch = {:id=>20}
+      set_dataset dataset.with_fetch(:id=>20)
     end
     p = @c2.load(:id=>10, :parent_id=>20)
     parent = p.parent
@@ -675,21 +673,6 @@ describe Sequel::Model, "many_to_one" do
     p.associations[:parent].must_equal :foo
   end
 
-  it "should raise error and not call internal add or remove method if before callback returns false, even if raise_on_save_failure is false" do
-    p = @c2.new
-    c = @c2.load(:id=>123)
-    p.raise_on_save_failure = false
-    @c2.many_to_one :parent, :class => @c2, :before_set=>:bs
-    def p.bs(x) false end
-    def p._parent=; raise; end
-    proc{p.parent = c}.must_raise(Sequel::HookFailed)
-    
-    p.parent.must_equal nil
-    p.associations[:parent] = c
-    p.parent.must_equal c
-    proc{p.parent = nil}.must_raise(Sequel::HookFailed)
-  end
-
   it "should raise error and not call internal add or remove method if before callback calls cancel_action, even if raise_on_save_failure is false" do
     p = @c2.new
     c = @c2.load(:id=>123)
@@ -699,7 +682,7 @@ describe Sequel::Model, "many_to_one" do
     def p._parent=; raise; end
     proc{p.parent = c}.must_raise(Sequel::HookFailed)
     
-    p.parent.must_equal nil
+    p.parent.must_be_nil
     p.associations[:parent] = c
     p.parent.must_equal c
     proc{p.parent = nil}.must_raise(Sequel::HookFailed)
@@ -708,6 +691,11 @@ describe Sequel::Model, "many_to_one" do
   it "should raise an error if a callback is not a proc or symbol" do
     @c2.many_to_one :parent, :class => @c2, :before_set=>Object.new
     proc{@c2.new.parent = @c2.load(:id=>1)}.must_raise(Sequel::Error)
+  end
+
+  it "should have association dataset use false condition if any key is nil" do
+    @c2.many_to_one :parent, :class => @c2
+    @c2.load({}).parent_dataset.sql.must_equal "SELECT * FROM nodes WHERE 'f' LIMIT 1"
   end
 end
 
@@ -727,8 +715,8 @@ describe Sequel::Model, "one_to_one" do
       columns :id, :x, :parent_id, :par_parent_id, :blah, :node_id
     end
     @dataset = @c2.dataset
-    @dataset._fetch = {}
-    @c1.dataset._fetch = {}
+    @dataset = @dataset.with_fetch({})
+    @c1.dataset = @c1.dataset.with_fetch({})
     DB.reset
   end
   
@@ -742,20 +730,19 @@ describe Sequel::Model, "one_to_one" do
 
   it "should not add a setter method if the :read_only option is true" do
     @c2.one_to_one :attribute, :class => @c1, :read_only=>true
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attribute')
-    im.wont_include('attribute=')
+    im = @c2.instance_methods
+    im.must_include(:attribute)
+    im.wont_include(:attribute=)
   end
 
   it "should add a setter method" do
     @c2.one_to_one :attribute, :class => @c1
     attrib = @c1.new(:id=>3)
-    @c1.dataset._fetch = @c1.instance_dataset._fetch = {:id=>3}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>3)
     @c2.new(:id => 1234).attribute = attrib
-    sqls = DB.sqls
-    ['INSERT INTO attributes (node_id, id) VALUES (1234, 3)',
-      'INSERT INTO attributes (id, node_id) VALUES (3, 1234)'].must_include(sqls.slice! 1)
-    sqls.must_equal ['UPDATE attributes SET node_id = NULL WHERE (node_id = 1234)', "SELECT * FROM attributes WHERE (id = 3) LIMIT 1"]
+    DB.sqls.must_equal ['UPDATE attributes SET node_id = NULL WHERE (node_id = 1234)',
+      'INSERT INTO attributes (id, node_id) VALUES (3, 1234)',
+      "SELECT * FROM attributes WHERE id = 3"]
 
     @c2.new(:id => 1234).attribute.must_equal attrib
     attrib = @c1.load(:id=>3)
@@ -789,12 +776,11 @@ describe Sequel::Model, "one_to_one" do
   it "should have the setter method respect the :primary_key option" do
     @c2.one_to_one :attribute, :class => @c1, :primary_key=>:xxx
     attrib = @c1.new(:id=>3)
-    @c1.dataset._fetch = @c1.instance_dataset._fetch = {:id=>3}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>3)
     @c2.new(:id => 1234, :xxx=>5).attribute = attrib
-    sqls = DB.sqls
-    ['INSERT INTO attributes (node_id, id) VALUES (5, 3)',
-      'INSERT INTO attributes (id, node_id) VALUES (3, 5)'].must_include(sqls.slice! 1)
-    sqls.must_equal ['UPDATE attributes SET node_id = NULL WHERE (node_id = 5)', "SELECT * FROM attributes WHERE (id = 3) LIMIT 1"]
+    DB.sqls.must_equal ['UPDATE attributes SET node_id = NULL WHERE (node_id = 5)',
+      'INSERT INTO attributes (id, node_id) VALUES (3, 5)',
+      "SELECT * FROM attributes WHERE id = 3"]
 
     @c2.new(:id => 321, :xxx=>5).attribute.must_equal attrib
     attrib = @c1.load(:id=>3)
@@ -807,15 +793,14 @@ describe Sequel::Model, "one_to_one" do
   it "should have the setter method respect composite keys" do
     @c2.one_to_one :attribute, :class => @c1, :key=>[:node_id, :y], :primary_key=>[:id, :x]
     attrib = @c1.load(:id=>3, :y=>6)
-    @c1.dataset._fetch = {:id=>3, :y=>6}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>3, :y=>6)
     @c2.load(:id => 1234, :x=>5).attribute = attrib
-    sqls = DB.sqls
-    sqls.last.must_match(/UPDATE attributes SET (node_id = 1234|y = 5), (node_id = 1234|y = 5) WHERE \(id = 3\)/)
-    sqls.first.must_match(/UPDATE attributes SET (node_id|y) = NULL, (node_id|y) = NULL WHERE \(\(node_id = 1234\) AND \(y = 5\) AND \(id != 3\)\)/)
-    sqls.length.must_equal 2
+    DB.sqls.must_equal ["UPDATE attributes SET node_id = NULL, y = NULL WHERE ((node_id = 1234) AND (y = 5) AND (id != 3))",
+      "UPDATE attributes SET y = 5, node_id = 1234 WHERE (id = 3)"]
   end
 
   it "should use implicit key if omitted" do
+    @c2.dataset = @c2.dataset.with_fetch({})
     @c2.one_to_one :parent, :class => @c2
 
     d = @c2.new(:id => 234)
@@ -851,6 +836,7 @@ describe Sequel::Model, "one_to_one" do
   end
 
   it "should use explicit key if given" do
+    @c2.dataset = @c2.dataset.with_fetch({})
     @c2.one_to_one :parent, :class => @c2, :key => :blah
 
     d = @c2.new(:id => 234)
@@ -875,7 +861,7 @@ describe Sequel::Model, "one_to_one" do
   
   it "should not issue query if not all keys have values" do
     @c2.one_to_one :parent, :class => @c2, :key=>[:id, :parent_id], :primary_key=>[:parent_id, :id]
-    @c2.new(:id => 1, :parent_id => nil).parent.must_equal nil
+    @c2.new(:id => 1, :parent_id => nil).parent.must_be_nil
     DB.sqls.must_equal []
   end
   
@@ -913,18 +899,18 @@ describe Sequel::Model, "one_to_one" do
   it "should return nil if primary_key value is nil" do
     @c2.one_to_one :parent, :class => @c2, :primary_key=>:node_id
 
-    @c2.new(:id => 1).parent.must_equal nil
+    @c2.new(:id => 1).parent.must_be_nil
     DB.sqls.must_equal []
   end
 
   it "should cache negative lookup" do
     @c2.one_to_one :parent, :class => @c2
-    @c2.dataset._fetch = []
+    @c2.dataset = @c2.dataset.with_fetch([])
     d = @c2.new(:id => 555)
     DB.sqls.must_equal []
-    d.parent.must_equal nil
+    d.parent.must_be_nil
     DB.sqls.must_equal ['SELECT * FROM nodes WHERE (nodes.node_id = 555) LIMIT 1']
-    d.parent.must_equal nil
+    d.parent.must_be_nil
     DB.sqls.must_equal []
   end
 
@@ -932,13 +918,12 @@ describe Sequel::Model, "one_to_one" do
     @c2.one_to_one :parent, :class => @c2, :key=>:blah
     d = @c2.new(:id => 3)
     e = @c2.new(:id => 4321, :blah=>444)
-    @c2.dataset._fetch = @c2.instance_dataset._fetch = {:id => 4321, :blah => 3}
+    @c2.dataset = @c2.dataset.with_fetch(:id => 4321, :blah => 3)
     d.parent = e
     e.values.must_equal(:id => 4321, :blah => 3)
-    sqls = DB.sqls
-    ["INSERT INTO nodes (blah, id) VALUES (3, 4321)",
-     "INSERT INTO nodes (id, blah) VALUES (4321, 3)"].must_include(sqls.slice! 1)
-    sqls.must_equal ["UPDATE nodes SET blah = NULL WHERE (blah = 3)", "SELECT * FROM nodes WHERE (id = 4321) LIMIT 1"]
+    DB.sqls.must_equal ["UPDATE nodes SET blah = NULL WHERE (blah = 3)",
+      "INSERT INTO nodes (id, blah) VALUES (4321, 3)",
+      "SELECT * FROM nodes WHERE id = 4321"]
   end
   
   it "should persist changes to associated object when the setter is called" do
@@ -953,8 +938,8 @@ describe Sequel::Model, "one_to_one" do
     @c2.one_to_one :parent, :class => @c2
 
     d = @c2.load(:id => 1)
-    d.associations[:parent].must_equal nil
-    @c2.dataset._fetch = {:id=>234}
+    d.associations[:parent].must_be_nil
+    @c2.dataset = @c2.dataset.with_fetch(:id=>234)
     e = d.parent 
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.node_id = 1) LIMIT 1"]
     d.parent
@@ -966,7 +951,7 @@ describe Sequel::Model, "one_to_one" do
     @c2.one_to_one :parent, :class => @c2
 
     d = @c2.load(:id => 1)
-    d.associations[:parent].must_equal nil
+    d.associations[:parent].must_be_nil
     e = @c2.load(:id => 234)
     d.parent = e
     f = d.parent 
@@ -986,7 +971,7 @@ describe Sequel::Model, "one_to_one" do
     @c2.one_to_one :parent, :class => @c2
     d = @c2.load(:id => 1)
     d.associations[:parent] = [42]
-    d.parent(true).wont_equal 42 
+    d.parent(:reload=>true).wont_equal 42 
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.node_id = 1) LIMIT 1"]
   end
   
@@ -1001,27 +986,27 @@ describe Sequel::Model, "one_to_one" do
     DB.sqls.must_equal ["UPDATE nodes SET parent_id = NULL WHERE ((parent_id = 1) AND (id != 2))",
       "UPDATE nodes SET parent_id = 1 WHERE (id = 2)"]
     d.parent = nil
-    e.child.must_equal nil
+    e.child.must_be_nil
     DB.sqls.must_equal ["UPDATE nodes SET parent_id = NULL WHERE (parent_id = 1)"]
   end
 
   it "should have the setter remove the object from the previous associated object's reciprocal many_to_one cached association array if it exists" do
     @c2.one_to_one :parent, :class => @c2, :key=>:parent_id
     @c2.many_to_one :child, :class => @c2, :key=>:parent_id
-    @c2.dataset._fetch = []
+    @c2.dataset = @c2.dataset.with_fetch([])
 
     d = @c2.load(:id => 1)
     e = @c2.load(:id => 2)
     f = @c2.load(:id => 3)
-    e.child.must_equal nil
-    f.child.must_equal nil
+    e.child.must_be_nil
+    f.child.must_be_nil
     d.parent = e
     e.child.must_equal d
     d.parent = f
     f.child.must_equal d
-    e.child.must_equal nil
+    e.child.must_be_nil
     d.parent = nil
-    f.child.must_equal nil
+    f.child.must_be_nil
   end
 
   it "should have the setter not modify the reciprocal if set to same value as current" do
@@ -1039,10 +1024,10 @@ describe Sequel::Model, "one_to_one" do
 
   it "should not add associations methods directly to class" do
     @c2.one_to_one :parent, :class => @c2
-    @c2.instance_methods.collect{|x| x.to_s}.must_include('parent')
-    @c2.instance_methods.collect{|x| x.to_s}.must_include('parent=')
-    @c2.instance_methods(false).collect{|x| x.to_s}.wont_include('parent')
-    @c2.instance_methods(false).collect{|x| x.to_s}.wont_include('parent=')
+    @c2.instance_methods.must_include(:parent)
+    @c2.instance_methods.must_include(:parent=)
+    @c2.instance_methods(false).wont_include(:parent)
+    @c2.instance_methods(false).wont_include(:parent=)
   end
 
   it "should raise an error if the current model object that doesn't have a valid primary key" do
@@ -1054,7 +1039,7 @@ describe Sequel::Model, "one_to_one" do
 
   it "should make the change to the foreign_key value inside a _association= method" do
     @c2.one_to_one :parent, :class => @c2
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_parent=")
+    @c2.private_instance_methods.must_include(:_parent=)
     c = @c2.new
     p = @c2.load(:id=>123)
     def p._parent=(x)
@@ -1103,7 +1088,7 @@ describe Sequel::Model, "one_to_one" do
       def al(v)
         model::Foo << v.pk
       end
-      @dataset._fetch = {:id=>20}
+      @dataset = @dataset.with_fetch(:id=>20)
     end
     p = @c2.load(:id=>10)
     parent = p.parent
@@ -1111,16 +1096,16 @@ describe Sequel::Model, "one_to_one" do
     parent.pk.must_equal 20
   end
 
-  it "should raise error and not call internal add or remove method if before callback returns false, even if raise_on_save_failure is false" do
+  it "should raise error and not call internal add or remove method if before callback calls cancel_action, even if raise_on_save_failure is false" do
     p = @c2.load(:id=>321)
     c = @c2.load(:id=>123)
     p.raise_on_save_failure = false
     @c2.one_to_one :parent, :class => @c2, :before_set=>:bs
-    def p.bs(x) false end
+    def p.bs(x) cancel_action end
     def p._parent=; raise; end
     proc{p.parent = c}.must_raise(Sequel::HookFailed)
     
-    p.associations[:parent].must_equal nil
+    p.associations[:parent].must_be_nil
     p.associations[:parent] = c
     p.parent.must_equal c
     proc{p.parent = nil}.must_raise(Sequel::HookFailed)
@@ -1140,9 +1125,15 @@ describe Sequel::Model, "one_to_one" do
   end
 
   it "should work_correctly when used with associate" do
+    @c2.dataset = @c2.dataset.with_fetch({})
     @c2.associate :one_to_one, :parent, :class => @c2
     @c2.load(:id => 567).parent.must_equal @c2.load({})
     DB.sqls.must_equal ["SELECT * FROM nodes WHERE (nodes.node_id = 567) LIMIT 1"]
+  end
+
+  it "should have association dataset use false condition if any key is nil" do
+    @c2.one_to_one :parent, :class => @c2, :primary_key=>:parent_id
+    @c2.load(:id=>1).parent_dataset.sql.must_equal "SELECT * FROM nodes WHERE 'f' LIMIT 1"
   end
 end
 
@@ -1162,9 +1153,8 @@ describe Sequel::Model, "one_to_many" do
       def self.to_s; 'Node'; end
       columns :id, :x
     end
-    @dataset = @c2.dataset
-    @dataset._fetch = {}
-    @c1.dataset._fetch = proc{|sql| sql =~ /SELECT 1/ ? {:a=>1} : {}}
+    @dataset = @c2.dataset = @c2.dataset.with_fetch({})
+    @c1.dataset = @c1.dataset.with_fetch(proc{|sql| sql =~ /SELECT 1/ ? {:a=>1} : {}})
     DB.reset
   end
 
@@ -1209,12 +1199,12 @@ describe Sequel::Model, "one_to_many" do
     end
   end
 
-  it "should use a callback if given one as the argument" do
+  it "should use a callback if given one as a block" do
     @c2.one_to_many :attributes, :class => @c1, :key => :nodeid
     
     d = @c2.load(:id => 1234)
     d.associations[:attributes] = []
-    d.attributes(proc{|ds| ds.filter{name > 'M'}}).wont_equal []
+    d.attributes{|ds| ds.where{name > 'M'}}.wont_equal []
     DB.sqls.must_equal ["SELECT * FROM attributes WHERE ((attributes.nodeid = 1234) AND (name > 'M'))"]
   end
   
@@ -1257,11 +1247,10 @@ describe Sequel::Model, "one_to_many" do
     
     n = @c2.load(:id => 1234)
     a = @c1.new(:id => 234)
-    @c1.dataset._fetch = @c1.instance_dataset._fetch = {:node_id => 1234, :id => 234}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>234, :node_id=>1234)
     a.must_equal n.add_attribute(a)
-    sqls = DB.sqls
-    sqls.shift.must_match(/INSERT INTO attributes \((node_)?id, (node_)?id\) VALUES \(1?234, 1?234\)/)
-    sqls.must_equal ["SELECT * FROM attributes WHERE (id = 234) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO attributes (id, node_id) VALUES (234, 1234)",
+      "SELECT * FROM attributes WHERE id = 234"]
     a.values.must_equal(:node_id => 1234, :id => 234)
   end
 
@@ -1280,7 +1269,7 @@ describe Sequel::Model, "one_to_many" do
     
     n = @c2.new(:id => 1234)
     a = @c1.load(:id => 2345, :node_id => 1234)
-    @c1.dataset._fetch = []
+    @c1.dataset = @c1.dataset.with_fetch([])
     proc{n.remove_attribute(a)}.must_raise(Sequel::Error)
     DB.sqls.must_equal ["SELECT 1 AS one FROM attributes WHERE ((attributes.node_id = 1234) AND (id = 2345)) LIMIT 1"]
   end
@@ -1289,17 +1278,16 @@ describe Sequel::Model, "one_to_many" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
     DB.reset
-    @c1.dataset._fetch = @c1.instance_dataset._fetch = {:node_id => 1234, :id => 234}
+    @c1.dataset = @c1.dataset.with_fetch(:node_id => 1234, :id => 234)
     n.add_attribute(:id => 234).must_equal @c1.load(:node_id => 1234, :id => 234)
-    sqls = DB.sqls
-    sqls.shift.must_match(/INSERT INTO attributes \((node_)?id, (node_)?id\) VALUES \(1?234, 1?234\)/)
-    sqls.must_equal ["SELECT * FROM attributes WHERE (id = 234) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO attributes (id, node_id) VALUES (234, 1234)",
+      "SELECT * FROM attributes WHERE id = 234"]
   end
 
   it "should accept a primary key for the add_ method" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
-    @c1.dataset._fetch = {:id=>234, :node_id=>nil}
+    @c1.dataset = @c1.dataset.with_fetch(:node_id => nil, :id => 234)
     n.add_attribute(234).must_equal @c1.load(:node_id => 1234, :id => 234)
     DB.sqls.must_equal ["SELECT * FROM attributes WHERE id = 234", "UPDATE attributes SET node_id = 1234 WHERE (id = 234)"]
   end
@@ -1307,7 +1295,7 @@ describe Sequel::Model, "one_to_many" do
   it "should raise an error if the primary key passed to the add_ method does not match an existing record" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
-    @c1.dataset._fetch = []
+    @c1.dataset = @c1.dataset.with_fetch([])
     proc{n.add_attribute(234)}.must_raise(Sequel::NoMatchingRow)
     DB.sqls.must_equal ["SELECT * FROM attributes WHERE id = 234"]
   end
@@ -1320,7 +1308,7 @@ describe Sequel::Model, "one_to_many" do
   it "should accept a primary key for the remove_ method and remove an existing record" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
-    @c1.dataset._fetch = {:id=>234, :node_id=>1234}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>234, :node_id=>1234)
     n.remove_attribute(234).must_equal @c1.load(:node_id => nil, :id => 234)
     DB.sqls.must_equal ['SELECT * FROM attributes WHERE ((attributes.node_id = 1234) AND (attributes.id = 234)) LIMIT 1',
       'UPDATE attributes SET node_id = NULL WHERE (id = 234)']
@@ -1359,23 +1347,19 @@ describe Sequel::Model, "one_to_many" do
     n = @c2.load(:id => 1234, :x=>5)
     a = @c1.load(:id => 2345)
     n.add_attribute(a).must_equal a
-    sqls = DB.sqls
-    sqls.shift.must_match(/UPDATE attributes SET (node_id = 1234|y = 5), (node_id = 1234|y = 5) WHERE \(id = 2345\)/)
-    sqls.must_equal []
+    DB.sqls.must_equal ["UPDATE attributes SET node_id = 1234, y = 5 WHERE (id = 2345)"]
   end
 
   it "should have add_ method accept a composite key" do
+    @c1.dataset = @c1.dataset.with_fetch(:id=>2345, :node_id=>1234, :z=>8, :y=>5)
     @c1.set_primary_key [:id, :z]
     @c2.one_to_many :attributes, :class => @c1, :key =>[:node_id, :y], :primary_key=>[:id, :x]
-    @c1.dataset._fetch = {:id => 2345, :z => 8, :node_id => 1234, :y=>5}
     
     n = @c2.load(:id => 1234, :x=>5)
     a = @c1.load(:id => 2345, :z => 8, :node_id => 1234, :y=>5)
     n.add_attribute([2345, 8]).must_equal a
-    sqls = DB.sqls
-    sqls.shift.must_match(/SELECT \* FROM attributes WHERE \(\((id|z) = (2345|8)\) AND \((id|z) = (2345|8)\)\) LIMIT 1/)
-    sqls.shift.must_match(/UPDATE attributes SET (node_id|y) = (1234|5), (node_id|y) = (1234|5) WHERE \(\((id|z) = (2345|8)\) AND \((id|z) = (2345|8)\)\)/)
-    sqls.must_equal []
+    DB.sqls.must_equal ["SELECT * FROM attributes WHERE ((id = 2345) AND (z = 8)) LIMIT 1",
+      "UPDATE attributes SET node_id = 1234, y = 5 WHERE ((id = 2345) AND (z = 8))"]
   end
   
   it "should have remove_ method respect composite keys" do
@@ -1384,21 +1368,18 @@ describe Sequel::Model, "one_to_many" do
     n = @c2.load(:id => 1234, :x=>5)
     a = @c1.load(:id => 2345, :node_id=>1234, :y=>5)
     n.remove_attribute(a).must_equal a
-    sqls = DB.sqls
-    sqls.pop.must_match(/UPDATE attributes SET (node_id|y) = NULL, (node_id|y) = NULL WHERE \(id = 2345\)/)
-    sqls.must_equal ["SELECT 1 AS one FROM attributes WHERE ((attributes.node_id = 1234) AND (attributes.y = 5) AND (id = 2345)) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT 1 AS one FROM attributes WHERE ((attributes.node_id = 1234) AND (attributes.y = 5) AND (id = 2345)) LIMIT 1",
+      "UPDATE attributes SET node_id = NULL, y = NULL WHERE (id = 2345)"]
   end
   
   it "should accept a array of composite primary key values for the remove_ method and remove an existing record" do
+    @c1.dataset = @c1.dataset.with_fetch(:id=>234, :node_id=>123, :y=>5)
     @c1.set_primary_key [:id, :y]
     @c2.one_to_many :attributes, :class => @c1, :key=>:node_id, :primary_key=>:id
     n = @c2.new(:id => 123)
-    @c1.dataset._fetch = {:id=>234, :node_id=>123, :y=>5}
     n.remove_attribute([234, 5]).must_equal @c1.load(:node_id => nil, :y => 5, :id => 234)
-    sqls = DB.sqls
-    sqls.length.must_equal 2
-    sqls.first.must_match(/SELECT \* FROM attributes WHERE \(\(attributes.node_id = 123\) AND \(attributes\.(id|y) = (234|5)\) AND \(attributes\.(id|y) = (234|5)\)\) LIMIT 1/)
-    sqls.last.must_match(/UPDATE attributes SET node_id = NULL WHERE \(\((id|y) = (234|5)\) AND \((id|y) = (234|5)\)\)/)
+    DB.sqls.must_equal ["SELECT * FROM attributes WHERE ((attributes.node_id = 123) AND (attributes.id = 234) AND (attributes.y = 5)) LIMIT 1",
+      "UPDATE attributes SET node_id = NULL WHERE ((id = 234) AND (y = 5))"]
   end
   
   it "should raise an error in add_ and remove_ if the passed object returns false to save (is not valid)" do
@@ -1425,9 +1406,9 @@ describe Sequel::Model, "one_to_many" do
     a = @c1.new(:id => 2345)
     def a.validate() errors.add(:id, 'foo') end
     n.associations[:attributes] = []
-    n.add_attribute(a).must_equal nil
+    n.add_attribute(a).must_be_nil
     n.associations[:attributes].must_equal []
-    n.remove_attribute(a).must_equal nil
+    n.remove_attribute(a).must_be_nil
     n.associations[:attributes].must_equal []
   end
 
@@ -1496,6 +1477,7 @@ describe Sequel::Model, "one_to_many" do
   
   it "should support a :dataset option that is used instead of the default" do
     c1 = @c1
+    @c1.dataset = @c1.dataset.with_fetch({})
     @c2.one_to_many :all_other_attributes, :class => @c1, :dataset=>proc{c1.exclude(:nodeid=>pk)}, :order=>:a, :limit=>10 do |ds|
       ds.filter(:xxx => 5)
     end
@@ -1537,7 +1519,7 @@ describe Sequel::Model, "one_to_many" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
     n.associations[:attributes] = 42
-    n.attributes(true).wont_equal 42
+    n.attributes(:reload=>true).wont_equal 42
     DB.sqls.must_equal ['SELECT * FROM attributes WHERE (attributes.node_id = 1234)']
   end
 
@@ -1581,33 +1563,33 @@ describe Sequel::Model, "one_to_many" do
     att.associations[:node] = n
     att.node.must_equal n
     n.remove_attribute(att)
-    att.node.must_equal nil
+    att.node.must_be_nil
   end
 
   it "should not create the add_, remove_, or remove_all_ methods if :read_only option is used" do
     @c2.one_to_many :attributes, :class => @c1, :read_only=>true
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attributes')
-    im.must_include('attributes_dataset')
-    im.wont_include('add_attribute')
-    im.wont_include('remove_attribute')
-    im.wont_include('remove_all_attributes')
+    im = @c2.instance_methods
+    im.must_include(:attributes)
+    im.must_include(:attributes_dataset)
+    im.wont_include(:add_attribute)
+    im.wont_include(:remove_attribute)
+    im.wont_include(:remove_all_attributes)
   end
 
   it "should not add associations methods directly to class" do
     @c2.one_to_many :attributes, :class => @c1
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attributes')
-    im.must_include('attributes_dataset')
-    im.must_include('add_attribute')
-    im.must_include('remove_attribute')
-    im.must_include('remove_all_attributes')
-    im2 = @c2.instance_methods(false).collect{|x| x.to_s}
-    im2.wont_include('attributes')
-    im2.wont_include('attributes_dataset')
-    im2.wont_include('add_attribute')
-    im2.wont_include('remove_attribute')
-    im2.wont_include('remove_all_attributes')
+    im = @c2.instance_methods
+    im.must_include(:attributes)
+    im.must_include(:attributes_dataset)
+    im.must_include(:add_attribute)
+    im.must_include(:remove_attribute)
+    im.must_include(:remove_all_attributes)
+    im2 = @c2.instance_methods(false)
+    im2.wont_include(:attributes)
+    im2.wont_include(:attributes_dataset)
+    im2.wont_include(:add_attribute)
+    im2.wont_include(:remove_attribute)
+    im2.wont_include(:remove_all_attributes)
   end
 
   it "should populate the reciprocal many_to_one cache when loading the one_to_many association" do
@@ -1656,9 +1638,7 @@ describe Sequel::Model, "one_to_many" do
   it "should have the remove_all_ method respect composite keys" do
     @c2.one_to_many :attributes, :class => @c1, :key=>[:node_id, :y], :primary_key=>[:id, :x]
     @c2.new(:id => 1234, :x=>5).remove_all_attributes
-    sqls = DB.sqls
-    sqls.pop.must_match(/UPDATE attributes SET (node_id|y) = NULL, (node_id|y) = NULL WHERE \(\(node_id = 1234\) AND \(y = 5\)\)/)
-    sqls.must_equal []
+    DB.sqls.must_equal ["UPDATE attributes SET node_id = NULL, y = NULL WHERE ((node_id = 1234) AND (y = 5))"]
   end
 
   it "remove_all should set the cache to []" do
@@ -1672,7 +1652,7 @@ describe Sequel::Model, "one_to_many" do
     @c2.one_to_many :attributes, :class => @c1
     attrib = @c1.new(:id=>3)
     node = @c2.new(:id => 1234)
-    @c1.dataset._fetch = [[], [{:id=>3, :node_id=>1234}]]
+    @c1.dataset = @c1.dataset.with_fetch([[], [{:id=>3, :node_id=>1234}]])
     node.attributes.must_equal []
     node.add_attribute(attrib)
     node.associations[:attributes].must_equal [attrib]
@@ -1681,27 +1661,27 @@ describe Sequel::Model, "one_to_many" do
 
   it "remove_all should return nil if the cache is not populated" do
     @c2.one_to_many :attributes, :class => @c1
-    @c2.new(:id => 1234).remove_all_attributes.must_equal nil
+    @c2.new(:id => 1234).remove_all_attributes.must_be_nil
   end
 
   it "remove_all should remove the current item from all reciprocal association caches if they are populated" do
     @c2.one_to_many :attributes, :class => @c1
     @c1.many_to_one :node, :class => @c2
-    @c2.dataset._fetch = []
-    @c1.dataset._fetch = [[], [{:id=>3, :node_id=>1234}]]
+    @c2.dataset = @c2.dataset.with_fetch([])
+    @c1.dataset = @c1.dataset.with_fetch([[], [{:id=>3, :node_id=>1234}]])
     attrib = @c1.new(:id=>3)
     node = @c2.load(:id => 1234)
     node.attributes.must_equal []
-    attrib.node.must_equal nil
+    attrib.node.must_be_nil
     node.add_attribute(attrib)
     attrib.associations[:node].must_equal node 
     node.remove_all_attributes
-    attrib.associations.fetch(:node, 2).must_equal nil
+    attrib.associations.fetch(:node, 2).must_be_nil
   end
 
   it "should call an _add_ method internally to add attributes" do
     @c2.one_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_add_attribute")
+    @c2.private_instance_methods.must_include(:_add_attribute)
     p = @c2.load(:id=>10)
     c = @c1.load(:id=>123)
     def p._add_attribute(x)
@@ -1737,7 +1717,7 @@ describe Sequel::Model, "one_to_many" do
 
   it "should call a _remove_ method internally to remove attributes" do
     @c2.one_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_remove_attribute")
+    @c2.private_instance_methods.must_include(:_remove_attribute)
     p = @c2.load(:id=>10)
     c = @c1.load(:id=>123)
     def p._remove_attribute(x)
@@ -1785,7 +1765,7 @@ describe Sequel::Model, "one_to_many" do
 
   it "should call a _remove_all_ method internally to remove attributes" do
     @c2.one_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_remove_all_attributes")
+    @c2.private_instance_methods.must_include(:_remove_all_attributes)
     p = @c2.load(:id=>10)
     def p._remove_all_attributes
       @x = :foo
@@ -1837,44 +1817,11 @@ describe Sequel::Model, "one_to_many" do
         v.each{|x| model::Foo << x.pk}
       end
     end
-    @c1.dataset._fetch = [{:id=>20}, {:id=>30}]
+    @c1.dataset = @c1.dataset.with_fetch([{:id=>20}, {:id=>30}])
     p = @c2.load(:id=>10, :parent_id=>20)
     attributes = p.attributes
     h.must_equal [[10, [20, 30]], 20, 30]
     attributes.collect{|a| a.pk}.must_equal [20, 30]
-  end
-
-  it "should raise error and not call internal add or remove method if before callback returns false if raise_on_save_failure is true" do
-    p = @c2.load(:id=>10)
-    c = @c1.load(:id=>123)
-    @c2.one_to_many :attributes, :class => @c1, :before_add=>:ba, :before_remove=>:br
-    def p.ba(c) false end
-    def p._add_attribute; raise; end
-    def p._remove_attribute; raise; end
-    p.associations[:attributes] = []
-    proc{p.add_attribute(c)}.must_raise(Sequel::HookFailed)
-    p.attributes.must_equal []
-    p.associations[:attributes] = [c]
-    def p.br(c) false end
-    proc{p.remove_attribute(c)}.must_raise(Sequel::HookFailed)
-    p.attributes.must_equal [c]
-  end
-
-  it "should return nil and not call internal add or remove method if before callback returns false if raise_on_save_failure is false" do
-    p = @c2.load(:id=>10)
-    c = @c1.load(:id=>123)
-    p.raise_on_save_failure = false
-    @c2.one_to_many :attributes, :class => @c1, :before_add=>:ba, :before_remove=>:br
-    def p.ba(c) false end
-    def p._add_attribute; raise; end
-    def p._remove_attribute; raise; end
-    p.associations[:attributes] = []
-    p.add_attribute(c).must_equal nil
-    p.attributes.must_equal []
-    p.associations[:attributes] = [c]
-    def p.br(c) false end
-    p.remove_attribute(c).must_equal nil
-    p.attributes.must_equal [c]
   end
 
   it "should raise error and not call internal add or remove method if before callback calls cancel_action if raise_on_save_failure is true" do
@@ -1902,12 +1849,17 @@ describe Sequel::Model, "one_to_many" do
     def p._add_attribute; raise; end
     def p._remove_attribute; raise; end
     p.associations[:attributes] = []
-    p.add_attribute(c).must_equal nil
+    p.add_attribute(c).must_be_nil
     p.attributes.must_equal []
     p.associations[:attributes] = [c]
     def p.br(o); cancel_action; end
-    p.remove_attribute(c).must_equal nil
+    p.remove_attribute(c).must_be_nil
     p.attributes.must_equal [c]
+  end
+
+  it "should have association dataset use false condition if any key is nil" do
+    @c1.one_to_many :children, :class => @c1, :primary_key=>:node_id
+    @c1.load(:id=>1).children_dataset.sql.must_equal "SELECT * FROM attributes WHERE 'f'"
   end
 end
 
@@ -1930,9 +1882,9 @@ describe Sequel::Model, "many_to_many" do
       columns :id, :x
     end
     @dataset = @c2.dataset
-    @c1.dataset.autoid = 1
+    @c1.dataset = @c1.dataset.with_autoid(1)
 
-    [@c1, @c2].each{|c| c.dataset._fetch = {}}
+    [@c1, @c2].each{|c| c.dataset = c.dataset.with_fetch({})}
     DB.reset
   end
 
@@ -1988,13 +1940,19 @@ describe Sequel::Model, "many_to_many" do
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.id, attributes.b FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
   end
   
-  it "should not override a selection consisting completely of qualified columns using symbols" do
+  with_symbol_splitting "should not override a selection consisting completely of qualified columns using symbols" do
     @c1.dataset = @c1.dataset.select(:attributes__id, :attributes__b)
     @c2.many_to_many :attributes, :class => @c1
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.id, attributes.b FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
   end
   
   it "should not override a selection consisting completely of qualified columns using Sequel::SQL::AliasedExpression" do
+    @c1.dataset = @c1.dataset.select(Sequel.qualify(:attributes, :id).as(:a), Sequel[:attributes][:b].as(:c))
+    @c2.many_to_many :attributes, :class => @c1
+    @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.id AS a, attributes.b AS c FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
+  end
+  
+  with_symbol_splitting "should not override a selection consisting completely of qualified columns using Sequel::SQL::AliasedExpression with qualified symbol" do
     @c1.dataset = @c1.dataset.select(Sequel.qualify(:attributes, :id).as(:a), Sequel.as(:attributes__b, :c))
     @c2.many_to_many :attributes, :class => @c1
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.id AS a, attributes.b AS c FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
@@ -2006,8 +1964,8 @@ describe Sequel::Model, "many_to_many" do
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
   end
   
-  it "should respect :eager_loader_predicate_key when lazily loading" do
-    @c2.many_to_many :attributes, :class => @c1, :eager_loading_predicate_key=>Sequel.subscript(:attributes_nodes__node_id, 0)
+  it "should respect :predicate_key when lazily loading" do
+    @c2.many_to_many :attributes, :class => @c1, :predicate_key=>Sequel.subscript(Sequel[:attributes_nodes][:node_id], 0)
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id[0] = 1234)'
   end
   
@@ -2020,7 +1978,7 @@ describe Sequel::Model, "many_to_many" do
     @c2.many_to_many :attributes, :class => @c1, :conditions => {:a=>32}
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((a = 32) AND (attributes_nodes.node_id = 1234))'
 
-    @c2.many_to_many :attributes, :class => @c1, :conditions => ['a = ?', 32]
+    @c2.many_to_many :attributes, :class => @c1, :conditions => Sequel.lit('a = ?', 32)
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((a = 32) AND (attributes_nodes.node_id = 1234))'
     @c2.new(:id => 1234).attributes.must_equal [@c1.load({})]
   end
@@ -2071,7 +2029,7 @@ describe Sequel::Model, "many_to_many" do
   end
   
   it "should support an array for the select option" do
-    @c2.many_to_many :attributes, :class => @c1, :select => [Sequel::SQL::ColumnAll.new(:attributes), :attribute_nodes__blah2]
+    @c2.many_to_many :attributes, :class => @c1, :select => [Sequel::SQL::ColumnAll.new(:attributes), Sequel[:attribute_nodes][:blah2]]
 
     @c2.new(:id => 1234).attributes_dataset.sql.must_equal 'SELECT attributes.*, attribute_nodes.blah2 FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)'
   end
@@ -2098,7 +2056,7 @@ describe Sequel::Model, "many_to_many" do
 
   it "should support a :dataset option that is used instead of the default" do
     c1 = @c1
-    @c2.many_to_many :attributes, :class => @c1, :dataset=>proc{c1.join_table(:natural, :an).filter(:an__nodeid=>pk)}, :order=> :a, :limit=>10, :select=>nil do |ds|
+    @c2.many_to_many :attributes, :class => @c1, :dataset=>proc{c1.join_table(:natural, :an).filter(Sequel[:an][:nodeid]=>pk)}, :order=> :a, :limit=>10, :select=>nil do |ds|
       ds.filter(:xxx => @xxx)
     end
 
@@ -2110,7 +2068,7 @@ describe Sequel::Model, "many_to_many" do
   end
 
   it "should support a :dataset option that accepts the reflection as an argument" do
-    @c2.many_to_many :attributes, :class => @c1, :dataset=>lambda{|opts| opts.associated_class.natural_join(:an).filter(:an__nodeid=>pk)}, :order=> :a, :limit=>10, :select=>nil do |ds|
+    @c2.many_to_many :attributes, :class => @c1, :dataset=>lambda{|opts| opts.associated_class.natural_join(:an).filter(Sequel[:an][:nodeid]=>pk)}, :order=> :a, :limit=>10, :select=>nil do |ds|
       ds.filter(:xxx => @xxx)
     end
 
@@ -2134,6 +2092,19 @@ describe Sequel::Model, "many_to_many" do
   end
   
   it "should handle an aliased join table" do
+    @c2.many_to_many :attributes, :class => @c1, :join_table => Sequel[:attribute2node].as(:attributes_nodes)
+    n = @c2.load(:id => 1234)
+    a = @c1.load(:id => 2345)
+    n.attributes_dataset.sql.must_equal "SELECT attributes.* FROM attributes INNER JOIN attribute2node AS attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)"
+    a.must_equal n.add_attribute(a)
+    a.must_equal n.remove_attribute(a)
+    n.remove_all_attributes
+    DB.sqls.must_equal ["INSERT INTO attribute2node (node_id, attribute_id) VALUES (1234, 2345)",
+      "DELETE FROM attribute2node WHERE ((node_id = 1234) AND (attribute_id = 2345))",
+      "DELETE FROM attribute2node WHERE (node_id = 1234)"]
+  end
+  
+  with_symbol_splitting "should handle an aliased symbol join table" do
     @c2.many_to_many :attributes, :class => @c1, :join_table => :attribute2node___attributes_nodes
     n = @c2.load(:id => 1234)
     a = @c1.load(:id => 2345)
@@ -2141,12 +2112,9 @@ describe Sequel::Model, "many_to_many" do
     a.must_equal n.add_attribute(a)
     a.must_equal n.remove_attribute(a)
     n.remove_all_attributes
-    sqls = DB.sqls
-    ['INSERT INTO attribute2node (node_id, attribute_id) VALUES (1234, 2345)',
-     'INSERT INTO attribute2node (attribute_id, node_id) VALUES (2345, 1234)'].must_include(sqls.shift)
-    ["DELETE FROM attribute2node WHERE ((node_id = 1234) AND (attribute_id = 2345))", 
-     "DELETE FROM attribute2node WHERE ((attribute_id = 2345) AND (node_id = 1234))"].must_include(sqls.shift)
-    sqls.must_equal ["DELETE FROM attribute2node WHERE (node_id = 1234)"]
+    DB.sqls.must_equal ["INSERT INTO attribute2node (node_id, attribute_id) VALUES (1234, 2345)",
+      "DELETE FROM attribute2node WHERE ((node_id = 1234) AND (attribute_id = 2345))",
+      "DELETE FROM attribute2node WHERE (node_id = 1234)"]
   end
   
   it "should define an add_ method that works on existing records" do
@@ -2155,10 +2123,7 @@ describe Sequel::Model, "many_to_many" do
     n = @c2.load(:id => 1234)
     a = @c1.load(:id => 2345)
     n.add_attribute(a).must_equal a
-    sqls = DB.sqls
-    ['INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 2345)',
-     'INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (2345, 1234)'].must_include(sqls.shift)
-    sqls.must_equal []
+    DB.sqls.must_equal ["INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 2345)"]
   end
 
   it "should define an add_ method that works with a primary key" do
@@ -2166,19 +2131,17 @@ describe Sequel::Model, "many_to_many" do
     
     n = @c2.load(:id => 1234)
     a = @c1.load(:id => 2345)
-    @c1.dataset._fetch = {:id=>2345}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>2345)
     n.add_attribute(2345).must_equal a
-    sqls = DB.sqls
-    ['INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 2345)',
-     'INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (2345, 1234)'].must_include(sqls.pop)
-    sqls.must_equal ["SELECT * FROM attributes WHERE id = 2345"]
+    DB.sqls.must_equal ["SELECT * FROM attributes WHERE id = 2345",
+      "INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 2345)"]
   end
 
   it "should raise an error if the primary key passed to the add_ method does not match an existing record" do
     @c2.many_to_many :attributes, :class => @c1
     
     n = @c2.load(:id => 1234)
-    @c1.dataset._fetch = []
+    @c1.dataset = @c1.dataset.with_fetch([])
     proc{n.add_attribute(2345)}.must_raise(Sequel::NoMatchingRow)
     DB.sqls.must_equal ["SELECT * FROM attributes WHERE id = 2345"]
   end
@@ -2187,13 +2150,11 @@ describe Sequel::Model, "many_to_many" do
     @c2.many_to_many :attributes, :class => @c1
     
     n = @c2.load(:id => 1234)
-    @c1.dataset._fetch = @c1.instance_dataset._fetch = {:id=>1}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>1)
     n.add_attribute(:id => 1).must_equal @c1.load(:id => 1)
-    sqls = DB.sqls
-    ['INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 1)',
-     'INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (1, 1234)'
-    ].must_include(sqls.pop)
-    sqls.must_equal ['INSERT INTO attributes (id) VALUES (1)', "SELECT * FROM attributes WHERE (id = 1) LIMIT 1"]
+    DB.sqls.must_equal ['INSERT INTO attributes (id) VALUES (1)',
+      "SELECT * FROM attributes WHERE id = 1",
+      "INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 1)"]
   end
 
   it "should define a remove_ method that works on existing records" do
@@ -2213,7 +2174,7 @@ describe Sequel::Model, "many_to_many" do
   it "should accept a primary key for the remove_ method and remove an existing record" do
     @c2.many_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
-    @c1.dataset._fetch = {:id=>234}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>234)
     n.remove_attribute(234).must_equal @c1.load(:id => 234)
     DB.sqls.must_equal ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((attributes_nodes.node_id = 1234) AND (attributes.id = 234)) LIMIT 1",
       "DELETE FROM attributes_nodes WHERE ((node_id = 1234) AND (attribute_id = 234))"]
@@ -2230,11 +2191,7 @@ describe Sequel::Model, "many_to_many" do
     n = @c2.load(:id => 1234).set(:xxx=>5)
     a = @c1.load(:id => 2345).set(:yyy=>8)
     n.add_attribute(a).must_equal a
-    sqls = DB.sqls
-    ['INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (5, 8)',
-     'INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (8, 5)'
-    ].must_include(sqls.pop)
-    sqls.must_equal []
+    DB.sqls.must_equal ["INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (5, 8)"]
   end
   
   it "should have add_ method not add the same object to the cached association array if the object is already in the array" do
@@ -2272,15 +2229,13 @@ describe Sequel::Model, "many_to_many" do
   
   it "should have the add_ method respect composite keys" do
     @c2.many_to_many :attributes, :class => @c1, :left_key=>[:l1, :l2], :right_key=>[:r1, :r2], :left_primary_key=>[:id, :x], :right_primary_key=>[:id, :z]
+    @c1.dataset = @c1.dataset.with_fetch(:id=>2345, :z=>8)
     @c1.set_primary_key [:id, :z]
     n = @c2.load(:id => 1234, :x=>5)
     a = @c1.load(:id => 2345, :z=>8)
-    @c1.dataset._fetch = {:id => 2345, :z=>8}
     n.add_attribute([2345, 8]).must_equal a
-    sqls = DB.sqls
-    sqls.shift.must_match(/SELECT \* FROM attributes WHERE \(\((id|z) = (8|2345)\) AND \((id|z) = (8|2345)\)\) LIMIT 1/)
-    sqls.pop.must_match(/INSERT INTO attributes_nodes \([lr][12], [lr][12], [lr][12], [lr][12]\) VALUES \((1234|5|2345|8), (1234|5|2345|8), (1234|5|2345|8), (1234|5|2345|8)\)/)
-    sqls.must_equal []
+    DB.sqls.must_equal ["SELECT * FROM attributes WHERE ((id = 2345) AND (z = 8)) LIMIT 1",
+      "INSERT INTO attributes_nodes (l1, l2, r1, r2) VALUES (1234, 5, 2345, 8)"]
   end
 
   it "should have the remove_ method respect the :left_primary_key and :right_primary_key options" do
@@ -2301,15 +2256,13 @@ describe Sequel::Model, "many_to_many" do
   end
 
   it "should accept a array of composite primary key values for the remove_ method and remove an existing record" do
+    @c1.dataset = @c1.dataset.with_fetch(:id=>234, :y=>8)
     @c1.set_primary_key [:id, :y]
     @c2.many_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
-    @c1.dataset._fetch = {:id=>234, :y=>8}
     @c1.load(:id => 234, :y=>8).must_equal n.remove_attribute([234, 8])
-    sqls = DB.sqls
-    ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((attributes_nodes.node_id = 1234) AND (attributes.id = 234) AND (attributes.y = 8)) LIMIT 1",
-      "SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((attributes_nodes.node_id = 1234) AND (attributes.y = 8) AND (attributes.id = 234)) LIMIT 1"].must_include(sqls.shift)
-    sqls.must_equal ["DELETE FROM attributes_nodes WHERE ((node_id = 1234) AND (attribute_id = 234))"]
+    DB.sqls.must_equal ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((attributes_nodes.node_id = 1234) AND (attributes.id = 234) AND (attributes.y = 8)) LIMIT 1",
+      "DELETE FROM attributes_nodes WHERE ((node_id = 1234) AND (attribute_id = 234))"]
   end
     
   it "should raise an error if the model object doesn't have a valid primary key" do
@@ -2327,7 +2280,7 @@ describe Sequel::Model, "many_to_many" do
     n = @c1.new
     a = @c2.load(:id=>123)
     n.new?.must_equal true
-    @c1.dataset._fetch = {:id=>1}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>1)
     a.add_attribute(n)
     n.new?.must_equal false
   end
@@ -2354,7 +2307,7 @@ describe Sequel::Model, "many_to_many" do
     n = @c1.new
     a = @c2.load(:id=>123)
     def n.validate() errors.add(:id, 'foo') end
-    @c1.dataset._fetch = {:id=>1}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>1)
     a.add_attribute(n)
     n.new?.must_equal false
   end
@@ -2396,7 +2349,7 @@ describe Sequel::Model, "many_to_many" do
 
     n = @c2.new(:id => 1234)
     n.associations[:attributes] = 42
-    n.attributes(true).wont_equal 42
+    n.attributes(:reload=>true).wont_equal 42
     DB.sqls.must_equal ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234)"]
   end
 
@@ -2446,28 +2399,28 @@ describe Sequel::Model, "many_to_many" do
 
   it "should not create the add_, remove_, or remove_all_ methods if :read_only option is used" do
     @c2.many_to_many :attributes, :class => @c1, :read_only=>true
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attributes')
-    im.must_include('attributes_dataset')
-    im.wont_include('add_attribute')
-    im.wont_include('remove_attribute')
-    im.wont_include('remove_all_attributes')
+    im = @c2.instance_methods
+    im.must_include(:attributes)
+    im.must_include(:attributes_dataset)
+    im.wont_include(:add_attribute)
+    im.wont_include(:remove_attribute)
+    im.wont_include(:remove_all_attributes)
   end
 
   it "should not add associations methods directly to class" do
     @c2.many_to_many :attributes, :class => @c1
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attributes')
-    im.must_include('attributes_dataset')
-    im.must_include('add_attribute')
-    im.must_include('remove_attribute')
-    im.must_include('remove_all_attributes')
-    im2 = @c2.instance_methods(false).collect{|x| x.to_s}
-    im2.wont_include('attributes')
-    im2.wont_include('attributes_dataset')
-    im2.wont_include('add_attribute')
-    im2.wont_include('remove_attribute')
-    im2.wont_include('remove_all_attributes')
+    im = @c2.instance_methods
+    im.must_include(:attributes)
+    im.must_include(:attributes_dataset)
+    im.must_include(:add_attribute)
+    im.must_include(:remove_attribute)
+    im.must_include(:remove_all_attributes)
+    im2 = @c2.instance_methods(false)
+    im2.wont_include(:attributes)
+    im2.wont_include(:attributes_dataset)
+    im2.wont_include(:add_attribute)
+    im2.wont_include(:remove_attribute)
+    im2.wont_include(:remove_all_attributes)
   end
 
   it "should have an remove_all_ method that removes all associations" do
@@ -2499,7 +2452,7 @@ describe Sequel::Model, "many_to_many" do
     @c2.many_to_many :attributes, :class => @c1
     attrib = @c1.load(:id=>3)
     node = @c2.load(:id => 1234)
-    @c1.dataset._fetch = []
+    @c1.dataset = @c1.dataset.with_fetch([])
     node.attributes.must_equal []
     node.add_attribute(attrib)
     node.associations[:attributes].must_equal [attrib]
@@ -2508,14 +2461,14 @@ describe Sequel::Model, "many_to_many" do
 
   it "remove_all should return nil if the cached instance variable does not exist" do
     @c2.many_to_many :attributes, :class => @c1
-    @c2.new(:id => 1234).remove_all_attributes.must_equal nil
+    @c2.new(:id => 1234).remove_all_attributes.must_be_nil
   end
 
   it "remove_all should remove the current item from all reciprocal instance varaibles if it cached instance variable exists" do
     @c2.many_to_many :attributes, :class => @c1
     @c1.many_to_many :nodes, :class => @c2
-    @c1.dataset._fetch = []
-    @c2.dataset._fetch = []
+    @c1.dataset = @c1.dataset.with_fetch([])
+    @c2.dataset = @c2.dataset.with_fetch([])
     attrib = @c1.load(:id=>3)
     node = @c2.new(:id => 1234)
     node.attributes.must_equal []
@@ -2540,7 +2493,7 @@ describe Sequel::Model, "many_to_many" do
 
   it "should call an _add_ method internally to add attributes" do
     @c2.many_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_add_attribute")
+    @c2.private_instance_methods.must_include(:_add_attribute)
     p = @c2.load(:id=>10)
     c = @c1.load(:id=>123)
     def p._add_attribute(x)
@@ -2575,7 +2528,7 @@ describe Sequel::Model, "many_to_many" do
 
   it "should call a _remove_ method internally to remove attributes" do
     @c2.many_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_remove_attribute")
+    @c2.private_instance_methods.must_include(:_remove_attribute)
     p = @c2.load(:id=>10)
     c = @c1.load(:id=>123)
     def p._remove_attribute(x)
@@ -2620,7 +2573,7 @@ describe Sequel::Model, "many_to_many" do
 
   it "should call a _remove_all_ method internally to remove attributes" do
     @c2.many_to_many :attributes, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_remove_all_attributes")
+    @c2.private_instance_methods.must_include(:_remove_all_attributes)
     p = @c2.load(:id=>10)
     def p._remove_all_attributes
       @x = :foo
@@ -2674,45 +2627,11 @@ describe Sequel::Model, "many_to_many" do
         v.each{|x| model::Foo << x.pk}
       end
     end
-    @c1.dataset._fetch = [{:id=>20}, {:id=>30}]
+    @c1.dataset = @c1.dataset.with_fetch([{:id=>20}, {:id=>30}])
     p = @c2.load(:id=>10, :parent_id=>20)
     attributes = p.attributes
     h.must_equal [[10, [20, 30]], 20, 30]
     attributes.collect{|a| a.pk}.must_equal [20, 30]
-  end
-
-  it "should raise error and not call internal add or remove method if before callback returns false if raise_on_save_failure is true" do
-    p = @c2.load(:id=>10)
-    c = @c1.load(:id=>123)
-    @c2.many_to_many :attributes, :class => @c1, :before_add=>:ba, :before_remove=>:br
-    def p.ba(c) false end
-    def p._add_attribute; raise; end
-    def p._remove_attribute; raise; end
-    p.associations[:attributes] = []
-    p.raise_on_save_failure = true
-    proc{p.add_attribute(c)}.must_raise(Sequel::HookFailed)
-    p.attributes.must_equal []
-    p.associations[:attributes] = [c]
-    def p.br(c) false end
-    proc{p.remove_attribute(c)}.must_raise(Sequel::HookFailed)
-    p.attributes.must_equal [c]
-  end
-
-  it "should return nil and not call internal add or remove method if before callback returns false if raise_on_save_failure is false" do
-    p = @c2.load(:id=>10)
-    c = @c1.load(:id=>123)
-    p.raise_on_save_failure = false
-    @c2.many_to_many :attributes, :class => @c1, :before_add=>:ba, :before_remove=>:br
-    def p.ba(c) false end
-    def p._add_attribute; raise; end
-    def p._remove_attribute; raise; end
-    p.associations[:attributes] = []
-    p.add_attribute(c).must_equal nil
-    p.attributes.must_equal []
-    p.associations[:attributes] = [c]
-    def p.br(c) false end
-    p.remove_attribute(c).must_equal nil
-    p.attributes.must_equal [c]
   end
 
   it "should raise error and not call internal add or remove method if before callback calls cancel_action if raise_on_save_failure is true" do
@@ -2741,17 +2660,17 @@ describe Sequel::Model, "many_to_many" do
     def p._add_attribute; raise; end
     def p._remove_attribute; raise; end
     p.associations[:attributes] = []
-    p.add_attribute(c).must_equal nil
+    p.add_attribute(c).must_be_nil
     p.attributes.must_equal []
     p.associations[:attributes] = [c]
     def p.br(o) cancel_action end
-    p.remove_attribute(c).must_equal nil
+    p.remove_attribute(c).must_be_nil
     p.attributes.must_equal [c]
   end
 
   it "should support a :uniq option that removes duplicates from the association" do
     @c2.many_to_many :attributes, :class => @c1, :uniq=>true
-    @c1.dataset._fetch = [{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}]
+    @c1.dataset = @c1.dataset.with_fetch([{:id=>20}, {:id=>30}, {:id=>20}, {:id=>30}])
     @c2.load(:id=>10, :parent_id=>20).attributes.must_equal [@c1.load(:id=>20), @c1.load(:id=>30)]
   end
   
@@ -2772,10 +2691,15 @@ describe Sequel::Model, "many_to_many" do
     @c2.many_to_many :attributes, :class => @c1 do |ds|
       ds.filter(:join_table_att=>3)
     end
-    @c1.dataset._fetch = {:id=>2}
+    @c1.dataset = @c1.dataset.with_fetch(:id=>2)
     @c2.load(:id=>1).remove_attribute(2)
     DB.sqls.must_equal ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((attributes_nodes.node_id = 1) AND (join_table_att = 3) AND (attributes.id = 2)) LIMIT 1",
       "DELETE FROM attributes_nodes WHERE ((node_id = 1) AND (attribute_id = 2))"] 
+  end
+
+  it "should have association dataset use false condition if any key is nil" do
+    @c1.many_to_many :attributes, :class => @c1, :left_primary_key=>:y
+    @c1.load(:id=>1).attributes_dataset.sql.must_equal "SELECT attributes.* FROM attributes INNER JOIN attributes_attributes ON (attributes_attributes.attribute_id = attributes.id) WHERE 'f'"
   end
 end
 
@@ -2798,9 +2722,9 @@ describe Sequel::Model, "one_through_one" do
       columns :id, :x
     end
     @dataset = @c2.dataset
-    @c1.dataset.autoid = 1
+    @c1.dataset = @c1.dataset.with_autoid(1)
 
-    [@c1, @c2].each{|c| c.dataset._fetch = {}}
+    [@c1, @c2].each{|c| c.dataset = c.dataset.with_fetch({})}
     DB.reset
   end
   after do
@@ -2812,8 +2736,8 @@ describe Sequel::Model, "one_through_one" do
     @c2.new(:id => 1234).attribute_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234) LIMIT 1'
   end
   
-  it "should respect :eager_loader_predicate_key when lazily loading" do
-    @c2.one_through_one :attribute, :class => @c1, :eager_loading_predicate_key=>Sequel.subscript(:attributes_nodes__node_id, 0)
+  it "should respect :predicate_key when lazily loading" do
+    @c2.one_through_one :attribute, :class => @c1, :predicate_key=>Sequel.subscript(Sequel[:attributes_nodes][:node_id], 0)
     @c2.new(:id => 1234).attribute_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id[0] = 1234) LIMIT 1'
   end
   
@@ -2826,7 +2750,7 @@ describe Sequel::Model, "one_through_one" do
     @c2.one_through_one :attribute, :class => @c1, :conditions => {:a=>32}
     @c2.new(:id => 1234).attribute_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((a = 32) AND (attributes_nodes.node_id = 1234)) LIMIT 1'
 
-    @c2.one_through_one :attribute, :class => @c1, :conditions => ['a = ?', 32]
+    @c2.one_through_one :attribute, :class => @c1, :conditions => Sequel.lit('a = ?', 32)
     @c2.new(:id => 1234).attribute_dataset.sql.must_equal 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE ((a = 32) AND (attributes_nodes.node_id = 1234)) LIMIT 1'
     @c2.new(:id => 1234).attribute.must_equal @c1.load({})
   end
@@ -2853,7 +2777,7 @@ describe Sequel::Model, "one_through_one" do
   
   it "should not issue query if not all keys have values" do
     @c2.one_through_one :attribute, :class => @c1, :left_key=>[:l1, :l2], :right_key=>[:r1, :r2], :left_primary_key=>[:id, :x], :right_primary_key=>[:id, :y]
-    @c2.load(:id => 1234, :x=>nil).attribute.must_equal nil
+    @c2.load(:id => 1234, :x=>nil).attribute.must_be_nil
     DB.sqls.must_equal []
   end
   
@@ -2877,7 +2801,7 @@ describe Sequel::Model, "one_through_one" do
   end
   
   it "should support an array for the select option" do
-    @c2.one_through_one :attribute, :class => @c1, :select => [Sequel::SQL::ColumnAll.new(:attributes), :attribute_nodes__blah2]
+    @c2.one_through_one :attribute, :class => @c1, :select => [Sequel::SQL::ColumnAll.new(:attributes), Sequel[:attribute_nodes][:blah2]]
 
     @c2.new(:id => 1234).attribute_dataset.sql.must_equal 'SELECT attributes.*, attribute_nodes.blah2 FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234) LIMIT 1'
   end
@@ -2904,7 +2828,7 @@ describe Sequel::Model, "one_through_one" do
 
   it "should support a :dataset option that is used instead of the default" do
     c1 = @c1
-    @c2.one_through_one :attribute, :class => @c1, :dataset=>proc{c1.join_table(:natural, :an).filter(:an__nodeid=>pk)}, :order=> :a, :select=>nil do |ds|
+    @c2.one_through_one :attribute, :class => @c1, :dataset=>proc{c1.join_table(:natural, :an).filter(Sequel[:an][:nodeid]=>pk)}, :order=> :a, :select=>nil do |ds|
       ds.filter(:xxx => @xxx)
     end
 
@@ -2916,7 +2840,7 @@ describe Sequel::Model, "one_through_one" do
   end
 
   it "should support a :dataset option that accepts the reflection as an argument" do
-    @c2.one_through_one :attribute, :class => @c1, :dataset=>lambda{|opts| opts.associated_class.natural_join(:an).filter(:an__nodeid=>pk)}, :order=> :a, :select=>nil do |ds|
+    @c2.one_through_one :attribute, :class => @c1, :dataset=>lambda{|opts| opts.associated_class.natural_join(:an).filter(Sequel[:an][:nodeid]=>pk)}, :order=> :a, :select=>nil do |ds|
       ds.filter(:xxx => @xxx)
     end
 
@@ -2938,6 +2862,12 @@ describe Sequel::Model, "one_through_one" do
   end
   
   it "should handle an aliased join table" do
+    @c2.one_through_one :attribute, :class => @c1, :join_table => Sequel[:attribute2node].as(:attributes_nodes)
+    n = @c2.load(:id => 1234)
+    n.attribute_dataset.sql.must_equal "SELECT attributes.* FROM attributes INNER JOIN attribute2node AS attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234) LIMIT 1"
+  end
+  
+  with_symbol_splitting "should handle an aliased join table with splittable symbol" do
     @c2.one_through_one :attribute, :class => @c1, :join_table => :attribute2node___attributes_nodes
     n = @c2.load(:id => 1234)
     n.attribute_dataset.sql.must_equal "SELECT attributes.* FROM attributes INNER JOIN attribute2node AS attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234) LIMIT 1"
@@ -2979,18 +2909,18 @@ describe Sequel::Model, "one_through_one" do
 
     n = @c2.new(:id => 1234)
     n.associations[:attribute] = 42
-    n.attribute(true).wont_equal 42
+    n.attribute(:reload=>true).wont_equal 42
     DB.sqls.must_equal ["SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON (attributes_nodes.attribute_id = attributes.id) WHERE (attributes_nodes.node_id = 1234) LIMIT 1"]
   end
 
   it "should not add associations methods directly to class" do
     @c2.one_through_one :attribute, :class => @c1
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attribute')
-    im.must_include('attribute_dataset')
-    im2 = @c2.instance_methods(false).collect{|x| x.to_s}
-    im2.wont_include('attribute')
-    im2.wont_include('attribute_dataset')
+    im = @c2.instance_methods
+    im.must_include(:attribute)
+    im.must_include(:attribute_dataset)
+    im2 = @c2.instance_methods(false)
+    im2.wont_include(:attribute)
+    im2.wont_include(:attribute_dataset)
   end
 
   it "should support after_load association callback" do
@@ -3002,7 +2932,7 @@ describe Sequel::Model, "one_through_one" do
         model::Foo << v.pk
       end
     end
-    @c1.dataset._fetch = [{:id=>20}]
+    @c1.dataset = @c1.dataset.with_fetch([{:id=>20}])
     p = @c2.load(:id=>10, :parent_id=>20)
     attribute = p.attribute
     h.must_equal [[10, 20], 20]
@@ -3016,9 +2946,9 @@ describe Sequel::Model, "one_through_one" do
 
   it "should not add a setter method if the :read_only option is true" do
     @c2.one_through_one :attribute, :class => @c1, :read_only=>true
-    im = @c2.instance_methods.collect{|x| x.to_s}
-    im.must_include('attribute')
-    im.wont_include('attribute=')
+    im = @c2.instance_methods
+    im.must_include(:attribute)
+    im.wont_include(:attribute=)
   end
 
   it "should add a setter method" do
@@ -3030,10 +2960,8 @@ describe Sequel::Model, "one_through_one" do
     DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 1234) LIMIT 1"]
 
     o.attribute = attrib
-    sqls = DB.sqls
-    ["INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (3, 1234)",
-      "INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 3)"].must_include(sqls.slice! 1)
-    sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 1234) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 1234) LIMIT 1",
+      "INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (3, 1234)"]
 
     DB.fetch = {:node_id=>1234, :attribute_id=>5}
     o.attribute = nil
@@ -3051,7 +2979,7 @@ describe Sequel::Model, "one_through_one" do
   it "should use a transaction in the setter method" do
     @c2.one_through_one :attribute, :class => @c1
     @c2.use_transactions = true
-    attrib = @c1.load(:id=>3)
+    @c1.load(:id=>3)
     DB.fetch = []
     @c2.new(:id => 1234).attribute = nil
     DB.sqls.must_equal ['BEGIN',
@@ -3068,10 +2996,8 @@ describe Sequel::Model, "one_through_one" do
     DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (a AND (node_id = 1234)) LIMIT 1"]
 
     o.attribute = attrib
-    sqls = DB.sqls
-    ["INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (3, 1234)",
-      "INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (1234, 3)"].must_include(sqls.slice! 1)
-    sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (a AND (node_id = 1234)) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (a AND (node_id = 1234)) LIMIT 1",
+      "INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (3, 1234)"]
 
     DB.fetch = {:node_id=>1234, :attribute_id=>5}
     o.attribute = nil
@@ -3092,10 +3018,8 @@ describe Sequel::Model, "one_through_one" do
     DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 5) LIMIT 1"]
 
     o.attribute = attrib
-    sqls = DB.sqls
-    ["INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (7, 5)",
-      "INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (5, 7)"].must_include(sqls.slice! 1)
-    sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 5) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE (node_id = 5) LIMIT 1",
+      "INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (7, 5)"]
 
     DB.fetch = {:node_id=>1234, :attribute_id=>9}
     o.attribute = nil
@@ -3117,9 +3041,8 @@ describe Sequel::Model, "one_through_one" do
     DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5)) LIMIT 1"]
 
     o.attribute = attrib
-    sqls = DB.sqls
-    sqls.slice!(1).must_match(/\AINSERT INTO attributes_nodes \((attribute_id|z|node_id|y), (attribute_id|z|node_id|y), (attribute_id|z|node_id|y), (attribute_id|z|node_id|y)\) VALUES \((3|7|1234|5), (3|7|1234|5), (3|7|1234|5), (3|7|1234|5)\)\z/)
-    sqls.must_equal ["SELECT * FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5)) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5)) LIMIT 1",
+      "INSERT INTO attributes_nodes (attribute_id, z, node_id, y) VALUES (3, 7, 1234, 5)"]
 
     DB.fetch = {:node_id=>1234, :attribute_id=>10, :y=>6, :z=>8}
     o.attribute = nil
@@ -3127,10 +3050,8 @@ describe Sequel::Model, "one_through_one" do
       "DELETE FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5) AND (attribute_id = 10) AND (z = 8))"]
 
     o.attribute = attrib
-    sqls = DB.sqls
-    ["UPDATE attributes_nodes SET attribute_id = 3, z = 7 WHERE ((node_id = 1234) AND (y = 5) AND (attribute_id = 10) AND (z = 8))",
-     "UPDATE attributes_nodes SET z = 7, attribute_id = 3 WHERE ((node_id = 1234) AND (y = 5) AND (attribute_id = 10) AND (z = 8))"].must_include(sqls.slice!(1))
-    sqls.must_equal ["SELECT * FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5)) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM attributes_nodes WHERE ((node_id = 1234) AND (y = 5)) LIMIT 1",
+      "UPDATE attributes_nodes SET attribute_id = 3, z = 7 WHERE ((node_id = 1234) AND (y = 5) AND (attribute_id = 10) AND (z = 8))"]
   end
 
   it "should raise an error if the current model object that doesn't have a valid primary key" do
@@ -3149,7 +3070,7 @@ describe Sequel::Model, "one_through_one" do
 
   it "should make the change to the foreign_key value inside a _association= method" do
     @c2.one_through_one :attribute, :class => @c1
-    @c2.private_instance_methods.collect{|x| x.to_s}.sort.must_include("_attribute=")
+    @c2.private_instance_methods.must_include(:_attribute=)
     attrib = @c1.new(:id=>3)
     o = @c2.new(:id => 1234)
     def o._attribute=(x)
@@ -3183,6 +3104,11 @@ describe Sequel::Model, "one_through_one" do
     h.must_equal [1234, -3, 3, :l]
     o.attribute = nil
     h.must_equal [1234, -3, 3, :l, 1234, :y, :x, :l]
+  end
+
+  it "should have association dataset use false condition if any key is nil" do
+    @c1.one_through_one :attribute, :class => @c1, :left_primary_key=>:y
+    @c1.load(:id=>1).attribute_dataset.sql.must_equal "SELECT attributes.* FROM attributes INNER JOIN attributes_attributes ON (attributes_attributes.attribute_id = attributes.id) WHERE 'f' LIMIT 1"
   end
 end
 
@@ -4467,10 +4393,17 @@ describe "Model#freeze" do
     @o.associations.frozen?.must_equal true
   end
 
+  it "should freeze associations after validating" do
+    Album.send(:define_method, :validate){super(); b}
+    @o = Album.load(:id=>1)
+    @o.freeze
+    @o.associations.fetch(:b).id.must_equal 1
+  end
+
   it "should not break associations getters" do
-    Album::B.dataset._fetch = {:album_id=>1, :id=>2}
+    Album::B.dataset = Album::B.dataset.with_fetch(:album_id=>1, :id=>2)
     @o.b.must_equal Album::B.load(:id=>2, :album_id=>1)
-    @o.associations[:b].must_equal nil
+    @o.associations[:b].must_be_nil
 
     @o = @o.dup
     @o.b.must_equal Album::B.load(:id=>2, :album_id=>1)
@@ -4480,7 +4413,7 @@ describe "Model#freeze" do
   it "should not break reciprocal associations" do
     b = Album::B.load(:id=>2, :album_id=>nil)
     b.album = @o
-    @o.associations[:b].must_equal nil
+    @o.associations[:b].must_be_nil
 
     @o = @o.dup
     b = Album::B.load(:id=>2, :album_id=>nil)
@@ -4493,7 +4426,7 @@ describe "association autoreloading" do
   before do
     @c = Class.new(Sequel::Model)
     @Artist = Class.new(@c).set_dataset(:artists)
-    @Artist.dataset._fetch = {:id=>2, :name=>'Ar'}
+    @Artist.dataset = @Artist.dataset.with_fetch(:id=>2, :name=>'Ar')
     @Album = Class.new(@c).set_dataset(:albums)
     @Artist.columns :id, :name
     @Album.columns :id, :name, :artist_id
@@ -4585,5 +4518,21 @@ describe "association autoreloading" do
     album.artist_id = 1
     album.artist
     DB.sqls.must_equal ['SELECT * FROM artists WHERE id = 1']
+  end
+end
+
+describe Sequel::Model, ".dataset_module" do
+  before do
+    @c = Class.new(Sequel::Model(:items))
+  end
+  
+  it "should have dataset_module support an eager method" do
+    @c.many_to_one :foo, :class=>@c
+    @c.many_to_one :bar, :class=>@c
+    @c.many_to_one :baz, :class=>@c
+    @c.many_to_one :quux, :class=>@c
+    @c.dataset_module{eager(:foo, {:foo=>{:bar=>:baz}}, :quux)}
+    @c.foo.opts[:eager].must_equal(:foo=>{:bar=>:baz}, :quux=>nil)
+    @c.where(:bar).foo.opts[:eager].must_equal(:foo=>{:bar=>:baz}, :quux=>nil)
   end
 end

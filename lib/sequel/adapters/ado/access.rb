@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
-Sequel.require 'adapters/shared/access'
-Sequel.require 'adapters/utils/split_alter_table'
+require_relative '../shared/access'
+require_relative '../utils/split_alter_table'
 
 module Sequel
   module ADO
@@ -15,7 +15,7 @@ module Sequel
           :tables  => 20,
           :views   => 23,
           :foreign_keys => 27
-        }
+        }.freeze
         
         attr_reader :type, :criteria
 
@@ -42,7 +42,8 @@ module Sequel
             131 => "DECIMAL",
             201 => "TEXT",
             205 => "IMAGE"
-          }
+          }.freeze
+          DATA_TYPE.each_value(&:freeze)
           
           def initialize(row)
             @row = row
@@ -86,13 +87,9 @@ module Sequel
       end      
 
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::Access::DatabaseMethods
         include Sequel::Database::SplitAlterTable
     
-        DECIMAL_TYPE_RE = /decimal/io
-        LAST_INSERT_ID = "SELECT @@IDENTITY".freeze
-
         # Remove cached schema after altering a table, since otherwise it can be cached
         # incorrectly in the rename column case.
         def alter_table(name, *)
@@ -112,7 +109,8 @@ module Sequel
           synchronize(opts[:server]) do |conn|
             begin
               log_connection_yield(sql, conn){conn.Execute(sql)}
-              res = log_connection_yield(LAST_INSERT_ID, conn){conn.Execute(LAST_INSERT_ID)}
+              last_insert_sql = "SELECT @@IDENTITY"
+              res = log_connection_yield(last_insert_sql, conn){conn.Execute(last_insert_sql)}
               res.getRows.transpose.each{|r| return r.shift}
             rescue ::WIN32OLERuntimeError => e
               raise_error(e)
@@ -131,7 +129,7 @@ module Sequel
           ado_schema_views.map {|tbl| m.call(tbl['TABLE_NAME'])}
         end
         
-        # Note OpenSchema returns compound indexes as multiple rows
+        # OpenSchema returns compound indexes as multiple rows
         def indexes(table_name,opts=OPTS)
           m = output_identifier_meth
           idxs = ado_schema_indexes(table_name).inject({}) do |memo, idx|
@@ -146,7 +144,7 @@ module Sequel
           idxs
         end
 
-        # Note OpenSchema returns compound foreign key relationships as multiple rows
+        # OpenSchema returns compound foreign key relationships as multiple rows
         def foreign_key_list(table, opts=OPTS)
           m = output_identifier_meth
           fks = ado_schema_foreign_keys(table).inject({}) do |memo, fk|
@@ -241,7 +239,7 @@ module Sequel
                                 idx["COLUMN_NAME"] == row["COLUMN_NAME"] &&
                                 idx["PRIMARY_KEY"]
                               },
-              :type =>  if row.db_type =~ DECIMAL_TYPE_RE && row.scale == 0
+              :type =>  if row.db_type =~ /decimal/i && row.scale == 0
                           :integer
                         else
                           schema_column_type(row.db_type)
@@ -296,7 +294,8 @@ module Sequel
         
         def fetch_ado_schema(type, criteria=[])
           execute_open_ado_schema(type, criteria) do |s|
-            cols = s.Fields.extend(Enumerable).map(&:Name)
+            cols = []
+            s.Fields.each{|f| cols << f.Name}
             s.getRows.transpose.each do |r|
               row = {}
               cols.each{|c| row[c] = r.shift}
@@ -308,7 +307,6 @@ module Sequel
         # This is like execute() in that it yields an ADO RecordSet, except
         # instead of an SQL interface there's this OpenSchema call
         # cf. http://msdn.microsoft.com/en-us/library/ee275721(v=bts.10)
-        #
         def execute_open_ado_schema(type, criteria=[])
           ado_schema = AdoSchema.new(type, criteria)
           synchronize(opts[:server]) do |conn|

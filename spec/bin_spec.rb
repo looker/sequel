@@ -1,4 +1,3 @@
-require 'rubygems'
 require 'rbconfig'
 require 'yaml'
 
@@ -16,15 +15,13 @@ else
   CONN_HASH = {:adapter=>'sqlite', :database=>BIN_SPEC_DB}
 end
 
-unless Object.const_defined?('Sequel') && Sequel.const_defined?('Model')
-  $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
-  require 'sequel'
-end
+require_relative '../lib/sequel'
 
-DB = Sequel.connect("#{CONN_PREFIX}#{BIN_SPEC_DB}")
-DB2 = Sequel.connect("#{CONN_PREFIX}#{BIN_SPEC_DB2}")
+Sequel::DB = nil
 File.delete(BIN_SPEC_DB) if File.file?(BIN_SPEC_DB)
 File.delete(BIN_SPEC_DB2) if File.file?(BIN_SPEC_DB2)
+DB = Sequel.connect("#{CONN_PREFIX}#{BIN_SPEC_DB}", :test=>false)
+DB2 = Sequel.connect("#{CONN_PREFIX}#{BIN_SPEC_DB2}", :test=>false)
 
 require 'minitest/autorun'
 
@@ -38,10 +35,15 @@ describe "bin/sequel" do
   after do
     DB.disconnect
     DB2.disconnect
-    File.delete(BIN_SPEC_DB) if File.file?(BIN_SPEC_DB)
-    File.delete(BIN_SPEC_DB2) if File.file?(BIN_SPEC_DB2)
-    File.delete(TMP_FILE) if File.file?(TMP_FILE)
-    File.delete(OUTPUT) if File.file?(OUTPUT)
+    [BIN_SPEC_DB, BIN_SPEC_DB2, TMP_FILE, OUTPUT].each do |file|
+      if File.file?(file)
+        begin
+          File.delete(file)
+        rescue Errno::ENOENT
+          nil
+        end
+      end
+    end
   end
   
   it "-h should print the help" do
@@ -152,7 +154,7 @@ END
   end
 
   it "-L should load all *.rb files in given directory" do
-    bin(:args=>'-L ./lib/sequel/connection_pool -c "p [Sequel::SingleConnectionPool, Sequel::ThreadedConnectionPool, Sequel::ShardedSingleConnectionPool, Sequel::ShardedThreadedConnectionPool].length"').must_equal "4\n"
+    bin(:args=>'-r ./lib/sequel/extensions/migration -L ./spec/files/integer_migrations -c "p Sequel::Migration.descendants.length"').must_equal "3\n"
   end
 
   it "-m should migrate database up" do
@@ -180,6 +182,15 @@ END
     DB.create_table(:a){Integer :a}
     bin(:args=>"-S #{TMP_FILE}").must_equal ''
     Marshal.load(File.read(TMP_FILE)).must_equal("`a`"=>[[:a, {:type=>:integer, :db_type=>"integer", :ruby_default=>nil, :allow_null=>true, :default=>nil, :primary_key=>false}]])
+  end
+
+  it "-X should dump the index cache" do
+    bin(:args=>"-X #{TMP_FILE}").must_equal ''
+    Marshal.load(File.read(TMP_FILE)).must_equal({})
+    DB.create_table(:a){Integer :id}
+    DB.create_table(:b){Integer :b, index: {name: "idx_test", unique: true}}
+    bin(:args=>"-X #{TMP_FILE}").must_equal ''
+    Marshal.load(File.read(TMP_FILE)).must_equal("`a`"=>{}, "`b`"=>{:idx_test=>{:unique=>true, :columns=>[:b]}})
   end
 
   it "-t should output full backtraces on error" do

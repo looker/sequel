@@ -1,13 +1,13 @@
 #!/usr/bin/env ruby
 # frozen-string-literal: true
 
-require 'rubygems'
 require 'optparse'
 
 code = nil
 copy_databases = nil
 dump_migration = nil
 dump_schema = nil
+dump_indexes = nil
 env = nil
 migrate_dir = nil
 migrate_ver = nil
@@ -84,7 +84,7 @@ options = OptionParser.new do |opts|
   end
   
   opts.on("-M", "--migrate-version VER", "migrate the database to version given") do |v|
-    migrate_ver = Integer(v)
+    migrate_ver = Integer(v, 10)
   end
 
   opts.on("-N", "--no-test-connection", "do not test the connection") do
@@ -107,6 +107,11 @@ options = OptionParser.new do |opts|
   opts.on_tail("-v", "--version", "Show version") do
     show_version = true
   end
+
+  opts.on("-X", "--dump-indexes filename", "dump the index cache for all tables to the file") do |v|
+    dump_indexes = v
+    exclusive_options << :X
+  end
 end
 opts = options
 opts.parse!
@@ -125,21 +130,19 @@ error_proc["Error: Must specify -m if using -M"] if migrate_ver && !migrate_dir
 error_proc["Error: Cannot specify #{exclusive_options.map{|v| "-#{v}"}.join(' and ')} together"] if exclusive_options.length > 1
 
 connect_proc = lambda do |database|
-  db = if database.nil? || database.empty?
-    Sequel.connect('mock:///')
+  db_opts = {:test=>test, :loggers=>loggers}
+  if database.nil? || database.empty?
+    Sequel.connect('mock:///', db_opts)
   elsif File.exist?(database)
     require 'yaml'
     env ||= "development"
     db_config = YAML.load_file(database)
     db_config = db_config[env] || db_config[env.to_sym] || db_config
     db_config.keys.each{|k| db_config[k.to_sym] = db_config.delete(k)}
-    Sequel.connect(db_config)
+    Sequel.connect(db_config, db_opts)
   else
-    Sequel.connect(database)
+    Sequel.connect(database, db_opts)
   end
-  db.loggers = loggers
-  db.test_connection if test
-  db
 end
 
 begin
@@ -171,6 +174,13 @@ begin
     DB.extension :schema_caching
     DB.tables.each{|t| DB.schema(Sequel::SQL::Identifier.new(t))}
     DB.dump_schema_cache(dump_schema)
+    exit
+  end
+  if dump_indexes
+    extra_proc.call
+    DB.extension :index_caching
+    DB.tables.each{|t| DB.indexes(Sequel::SQL::Identifier.new(t))}
+    DB.dump_index_cache(dump_indexes)
     exit
   end
   if copy_databases

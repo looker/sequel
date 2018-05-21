@@ -1,53 +1,95 @@
 # frozen-string-literal: true
 
-Sequel.require 'adapters/utils/pg_types'
+require_relative '../utils/unmodified_identifiers'
 
 module Sequel
   # Top level module for holding all PostgreSQL-related modules and classes
-  # for Sequel.  There are a few module level accessors that are added via
-  # metaprogramming.  These are:
+  # for Sequel.  All adapters that connect to PostgreSQL support the following options:
   #
-  # client_min_messages :: Change the minimum level of messages that PostgreSQL will send to the
-  #                        the client.  The PostgreSQL default is NOTICE, the Sequel default is
-  #                        WARNING.  Set to nil to not change the server default. Overridable on
-  #                        a per instance basis via the :client_min_messages option.
-  # force_standard_strings :: Set to false to not force the use of standard strings.  Overridable
-  #                           on a per instance basis via the :force_standard_strings option.
-  #
-  # It is not recommened you use these module-level accessors.  Instead,
-  # use the database option to make the setting per-Database.
-  #
-  # All adapters that connect to PostgreSQL support the following option in
-  # addition to those mentioned above:
-  #
+  # :client_min_messages :: Change the minimum level of messages that PostgreSQL will send to the
+  #                         the client.  The PostgreSQL default is NOTICE, the Sequel default is
+  #                         WARNING.  Set to nil to not change the server default. Overridable on
+  #                         a per instance basis via the :client_min_messages option.
+  # :force_standard_strings :: Set to false to not force the use of standard strings.  Overridable
+  #                            on a per instance basis via the :force_standard_strings option.
   # :search_path :: Set the schema search_path for this Database's connections.
   #                 Allows to to set which schemas do not need explicit
   #                 qualification, and in which order to check the schemas when
   #                 an unqualified object is referenced.
   module Postgres
-    # Array of exceptions that need to be converted.  JDBC
-    # uses NativeExceptions, the native adapter uses PGError.
-    CONVERTED_EXCEPTIONS = []
+    Sequel::Database.set_shared_adapter_scheme(:postgres, self)
 
-    @client_min_messages = :warning
-    @force_standard_strings = true
+    NAN             = 0.0/0.0
+    PLUS_INFINITY   = 1.0/0.0
+    MINUS_INFINITY  = -1.0/0.0
 
-    class << self
-      # By default, Sequel sets the minimum level of log messages sent to the client
-      # to WARNING, where PostgreSQL uses a default of NOTICE.  This is to avoid a lot
-      # of mostly useless messages when running migrations, such as a couple of lines
-      # for every serial primary key field.
-      attr_accessor :client_min_messages
+    TYPE_TRANSLATOR = tt = Class.new do
+      def boolean(s) s == 't' end
+      def integer(s) s.to_i end
+      def float(s) 
+        case s
+        when 'NaN'
+          NAN
+        when 'Infinity'
+          PLUS_INFINITY
+        when '-Infinity'
+          MINUS_INFINITY
+        else
+          s.to_f 
+        end
+      end
+      def date(s) ::Date.new(*s.split('-').map(&:to_i)) end
+      def bytea(str)
+        str = if str =~ /\A\\x/
+          # PostgreSQL 9.0+ bytea hex format
+          str[2..-1].gsub(/(..)/){|s| s.to_i(16).chr}
+        else
+          # Historical PostgreSQL bytea escape format
+          str.gsub(/\\(\\|'|[0-3][0-7][0-7])/) {|s|
+            if s.size == 2 then s[1,1] else s[1,3].oct.chr end
+          }
+        end
+        ::Sequel::SQL::Blob.new(str)
+      end
+    end.new.freeze
 
-      # By default, Sequel forces the use of standard strings, so that
-      # '\\' is interpreted as \\ and not \.  While PostgreSQL <9.1 defaults
-      # to interpreting plain strings, newer versions use standard strings by
-      # default.  Sequel assumes that SQL standard strings will be used.  Setting
-      # this to false means Sequel will use the database's default.
-      attr_accessor :force_standard_strings
+    CONVERSION_PROCS = {}
+
+    {
+      [16] => tt.method(:boolean),
+      [17] => tt.method(:bytea),
+      [20, 21, 23, 26] => tt.method(:integer),
+      [700, 701] => tt.method(:float),
+      [1700] => ::BigDecimal.method(:new),
+      [1083, 1266] => ::Sequel.method(:string_to_time),
+      [1082] => ::Sequel.method(:string_to_date),
+      [1184, 1114] => ::Sequel.method(:database_to_application_timestamp),
+    }.each do |k,v|
+      k.each do |n|
+        CONVERSION_PROCS[n] = v
+      end
+    end
+    CONVERSION_PROCS.freeze
+
+    module MockAdapterDatabaseMethods
+      def bound_variable_arg(arg, conn)
+        arg
+      end
+
+      def primary_key(table)
+        :id
+      end
     end
 
-    class CreateTableGenerator < Sequel::Schema::Generator
+    def self.mock_adapter_setup(db)
+      db.instance_exec do
+        @server_version = 90500
+        initialize_postgres_adapter
+        extend(MockAdapterDatabaseMethods)
+      end
+    end
+
+    class CreateTableGenerator < Sequel::Schema::CreateTableGenerator
       # Add an exclusion constraint when creating the table. Elements should be
       # an array of 2 element arrays, with the first element being the column or
       # expression the exclusion constraint is applied to, and the second element
@@ -87,18 +129,13 @@ module Sequel
     # Error raised when Sequel determines a PostgreSQL exclusion constraint has been violated.
     class ExclusionConstraintViolation < Sequel::ConstraintViolation; end
 
-    # Methods shared by Database instances that connect to PostgreSQL.
     module DatabaseMethods
-      extend Sequel::Database::ResetIdentifierMangling
+      include UnmodifiedIdentifiers::DatabaseMethods
 
       PREPARED_ARG_PLACEHOLDER = LiteralString.new('$').freeze
-      RE_CURRVAL_ERROR = /currval of sequence "(.*)" is not yet defined in this session|relation "(.*)" does not exist/.freeze
-      FOREIGN_KEY_LIST_ON_DELETE_MAP = {'a'.freeze=>:no_action, 'r'.freeze=>:restrict, 'c'.freeze=>:cascade, 'n'.freeze=>:set_null, 'd'.freeze=>:set_default}.freeze
-      POSTGRES_DEFAULT_RE = /\A(?:B?('.*')::[^']+|\((-?\d+(?:\.\d+)?)\))\z/
-      UNLOGGED = 'UNLOGGED '.freeze
-      ON_COMMIT = {
-        :drop => 'DROP', :delete_rows => 'DELETE ROWS', :preserve_rows => 'PRESERVE ROWS',
-      }.freeze
+      FOREIGN_KEY_LIST_ON_DELETE_MAP = {'a'=>:no_action, 'r'=>:restrict, 'c'=>:cascade, 'n'=>:set_null, 'd'=>:set_default}.freeze
+      ON_COMMIT = {:drop => 'DROP', :delete_rows => 'DELETE ROWS', :preserve_rows => 'PRESERVE ROWS'}.freeze
+      ON_COMMIT.each_value(&:freeze)
 
       # SQL fragment for custom sequences (ones not created by serial primary key),
       # Returning the schema and literal form of the sequence name, by parsing
@@ -156,19 +193,120 @@ module Sequel
       # having callable values for the conversion proc for that type.
       attr_reader :conversion_procs
 
-      # Add a conversion proc for a named type.  This should be used 
-      # for types without fixed OIDs, which includes all types that
-      # are not included in a default PostgreSQL installation.  If 
-      # a block is given, it is used as the conversion proc, otherwise
-      # the conversion proc is looked up in the PG_NAMED_TYPES hash.
-      def add_named_conversion_proc(name, &block)
-        add_named_conversion_procs(conversion_procs, name=>(block || PG_NAMED_TYPES[name]))
+      # Set a conversion proc for the given oid.  The callable can
+      # be passed either as a argument or a block.
+      def add_conversion_proc(oid, callable=Proc.new)
+        conversion_procs[oid] = callable
       end
 
-      # Commit an existing prepared transaction with the given transaction
-      # identifier string.
+      # Add a conversion proc for a named type, using the given block.
+      # This should be used for types without fixed OIDs, which includes all types that
+      # are not included in a default PostgreSQL installation.
+      def add_named_conversion_proc(name, &block)
+        unless oid = from(:pg_type).where(:typtype=>['b', 'e'], :typname=>name.to_s).get(:oid)
+          raise Error, "No matching type in pg_type for #{name.inspect}"
+        end
+        add_conversion_proc(oid, block)
+      end
+
       def commit_prepared_transaction(transaction_id, opts=OPTS)
         run("COMMIT PREPARED #{literal(transaction_id)}", opts)
+      end
+
+      # A hash of metadata for CHECK constraints on the table.
+      # Keys are CHECK constraint name symbols.  Values are hashes with the following keys:
+      # :definition :: An SQL fragment for the definition of the constraint
+      # :columns :: An array of column symbols for the columns referenced in the constraint
+      def check_constraints(table)
+        m = output_identifier_meth
+
+        rows = metadata_dataset.
+          from{pg_constraint.as(:co)}.
+          join(Sequel[:pg_attribute].as(:att), :attrelid=>:conrelid, :attnum=>SQL::Function.new(:ANY, Sequel[:co][:conkey])).
+          where(:conrelid=>regclass_oid(table), :contype=>'c').
+          select{[co[:conname].as(:constraint), att[:attname].as(:column), pg_get_constraintdef(co[:oid]).as(:definition)]}
+
+        hash = {}
+        rows.each do |row|
+          constraint = m.call(row[:constraint])
+          if entry = hash[constraint]
+            entry[:columns] << m.call(row[:column])
+          else
+            hash[constraint] = {:definition=>row[:definition], :columns=>[m.call(row[:column])]}
+          end
+        end
+        
+        hash
+      end
+
+      # Convert the first primary key column in the +table+ from being a serial column to being an identity column.
+      # If the column is already an identity column, assume it was already converted and make no changes.
+      #
+      # Only supported on PostgreSQL 10.2+, since on those versions Sequel will use identity columns
+      # instead of serial columns for auto incrementing primary keys. Only supported when running as
+      # a superuser, since regular users cannot modify system tables, and there is no way to keep an
+      # existing sequence when changing an existing column to be an identity column.
+      #
+      # This method can raise an exception in at least the following cases where it may otherwise succeed
+      # (there may be additional cases not listed here):
+      #
+      # * The serial column was added after table creation using PostgreSQL <7.3
+      # * A regular index also exists on the column (such an index can probably be dropped as the
+      #   primary key index should suffice)
+      #
+      # Options:
+      # :column :: Specify the column to convert instead of using the first primary key column
+      # :server :: Run the SQL on the given server
+      def convert_serial_to_identity(table, opts=OPTS)
+        raise Error, "convert_serial_to_identity is only supported on PostgreSQL 10.2+" unless server_version >= 100002
+
+        server = opts[:server]
+        server_hash = server ? {:server=>server} : OPTS
+        ds = dataset
+        ds = ds.server(server) if server
+
+        raise Error, "convert_serial_to_identity requires superuser permissions" unless ds.get{current_setting('is_superuser')} == 'on'
+
+        table_oid = regclass_oid(table)
+        im = input_identifier_meth
+        unless column = im.call(opts[:column] || ((sch = schema(table).find{|col, sch| sch[:primary_key] && sch[:auto_increment]}) && sch[0]))
+          raise Error, "could not determine column to convert from serial to identity automatically"
+        end
+
+        column_num = ds.from(:pg_attribute).
+          where(:attrelid=>table_oid, :attname=>column).
+          get(:attnum)
+
+        pg_class = Sequel.cast('pg_class', :regclass)
+        res = ds.from(:pg_depend).
+          where(:refclassid=>pg_class, :refobjid=>table_oid, :refobjsubid=>column_num, :classid=>pg_class, :objsubid=>0, :deptype=>%w'a i').
+          select_map([:objid, Sequel.as({:deptype=>'i'}, :v)])
+
+        case res.length
+        when 0
+          raise Error, "unable to find related sequence when converting serial to identity"
+        when 1
+          seq_oid, already_identity = res.first
+        else
+          raise Error, "more than one linked sequence found when converting serial to identity"
+        end
+
+        return if already_identity
+
+        transaction(server_hash) do
+          run("ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(column)} DROP DEFAULT", server_hash)
+
+          ds.from(:pg_depend).
+            where(:classid=>pg_class, :objid=>seq_oid, :objsubid=>0, :deptype=>'a').
+            update(:deptype=>'i')
+
+          ds.from(:pg_attribute).
+            where(:attrelid=>table_oid, :attname=>column).
+            update(:attidentity=>'d')
+        end
+
+        remove_cached_schema(table)
+        nil
       end
 
       # Creates the function in the database.  Arguments:
@@ -230,7 +368,6 @@ module Sequel
         self << create_trigger_sql(table, name, function, opts)
       end
 
-      # PostgreSQL uses the :postgres database type.
       def database_type
         :postgres
       end
@@ -285,75 +422,144 @@ module Sequel
 
       # Return full foreign key information using the pg system tables, including
       # :name, :on_delete, :on_update, and :deferrable entries in the hashes.
+      #
+      # Supports additional options:
+      # :reverse :: Instead of returning foreign keys in the current table, return
+      #             foreign keys in other tables that reference the current table.
+      # :schema :: Set to true to have the :table value in the hashes be a qualified
+      #            identifier.  Set to false to use a separate :schema value with
+      #            the related schema.  Defaults to whether the given table argument
+      #            is a qualified identifier.
       def foreign_key_list(table, opts=OPTS)
         m = output_identifier_meth
         schema, _ = opts.fetch(:schema, schema_and_table(table))
-        range = 0...32
+        oid = regclass_oid(table)
+        reverse = opts[:reverse]
 
-        base_ds = metadata_dataset.
-          from(:pg_constraint___co).
-          join(:pg_class___cl, :oid=>:conrelid).
-          where(:cl__relkind=>'r', :co__contype=>'f', :cl__oid=>regclass_oid(table))
+        if reverse
+          ctable = Sequel[:att2]
+          cclass = Sequel[:cl2]
+          rtable = Sequel[:att]
+          rclass = Sequel[:cl]
+        else
+          ctable = Sequel[:att]
+          cclass = Sequel[:cl]
+          rtable = Sequel[:att2]
+          rclass = Sequel[:cl2]
+        end
 
-        # We split the parsing into two separate queries, which are merged manually later.
-        # This is because PostgreSQL stores both the referencing and referenced columns in
-        # arrays, and I don't know a simple way to not create a cross product, as PostgreSQL
-        # doesn't appear to have a function that takes an array and element and gives you
-        # the index of that element in the array.
+        if server_version >= 90500
+          cpos = Sequel.expr{array_position(co[:conkey], ctable[:attnum])}
+          rpos = Sequel.expr{array_position(co[:confkey], rtable[:attnum])}
+        else
+          range = 0...32
+          cpos = Sequel.expr{SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(co[:conkey], [x]), x]}, 32, ctable[:attnum])}
+          rpos = Sequel.expr{SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(co[:confkey], [x]), x]}, 32, rtable[:attnum])}
+        end
 
-        ds = base_ds.
-          join(:pg_attribute___att, :attrelid=>:oid, :attnum=>SQL::Function.new(:ANY, :co__conkey)).
-          order(:co__conname, SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(:co__conkey, [x]), x]}, 32, :att__attnum)).
-          select(:co__conname___name, :att__attname___column, :co__confupdtype___on_update, :co__confdeltype___on_delete,
-                 SQL::BooleanExpression.new(:AND, :co__condeferrable, :co__condeferred).as(:deferrable))
+        ds = metadata_dataset.
+          from{pg_constraint.as(:co)}.
+          join(Sequel[:pg_class].as(cclass), :oid=>:conrelid).
+          join(Sequel[:pg_attribute].as(ctable), :attrelid=>:oid, :attnum=>SQL::Function.new(:ANY, Sequel[:co][:conkey])).
+          join(Sequel[:pg_class].as(rclass), :oid=>Sequel[:co][:confrelid]).
+          join(Sequel[:pg_attribute].as(rtable), :attrelid=>:oid, :attnum=>SQL::Function.new(:ANY, Sequel[:co][:confkey])).
+          join(Sequel[:pg_namespace].as(:nsp), :oid=>Sequel[:cl2][:relnamespace]).
+          order{[co[:conname], cpos]}.
+          where{{
+            cl[:relkind]=>'r',
+            co[:contype]=>'f',
+            cl[:oid]=>oid,
+            cpos=>rpos
+          }}.
+          select{[
+            co[:conname].as(:name),
+            ctable[:attname].as(:column),
+            co[:confupdtype].as(:on_update),
+            co[:confdeltype].as(:on_delete),
+            cl2[:relname].as(:table),
+            rtable[:attname].as(:refcolumn),
+            SQL::BooleanExpression.new(:AND, co[:condeferrable], co[:condeferred]).as(:deferrable),
+            nsp[:nspname].as(:schema)
+          ]}
 
-        ref_ds = base_ds.
-          join(:pg_class___cl2, :oid=>:co__confrelid).
-          join(:pg_attribute___att2, :attrelid=>:oid, :attnum=>SQL::Function.new(:ANY, :co__confkey)).
-          order(:co__conname, SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(:co__confkey, [x]), x]}, 32, :att2__attnum)).
-          select(:co__conname___name, :cl2__relname___table, :att2__attname___refcolumn)
-
-        # If a schema is given, we only search in that schema, and the returned :table
-        # entry is schema qualified as well.
-        if schema
-          ref_ds = ref_ds.join(:pg_namespace___nsp2, :oid=>:cl2__relnamespace).
-            select_more(:nsp2__nspname___schema)
+        if reverse
+          ds = ds.order_append(Sequel[:nsp][:nspname], Sequel[:cl2][:relname])
         end
 
         h = {}
         fklod_map = FOREIGN_KEY_LIST_ON_DELETE_MAP 
+
         ds.each do |row|
-          if r = h[row[:name]]
-            r[:columns] << m.call(row[:column])
+          if reverse
+            key = [row[:schema], row[:table], row[:name]]
           else
-            h[row[:name]] = {:name=>m.call(row[:name]), :columns=>[m.call(row[:column])], :on_update=>fklod_map[row[:on_update]], :on_delete=>fklod_map[row[:on_delete]], :deferrable=>row[:deferrable]}
+            key = row[:name]
+          end
+
+          if r = h[key]
+            r[:columns] << m.call(row[:column])
+            r[:key] << m.call(row[:refcolumn])
+          else
+            entry = h[key] = {
+              :name=>m.call(row[:name]),
+              :columns=>[m.call(row[:column])],
+              :key=>[m.call(row[:refcolumn])],
+              :on_update=>fklod_map[row[:on_update]],
+              :on_delete=>fklod_map[row[:on_delete]],
+              :deferrable=>row[:deferrable],
+              :table=>schema ? SQL::QualifiedIdentifier.new(m.call(row[:schema]), m.call(row[:table])) : m.call(row[:table]),
+            }
+
+            unless schema
+              # If not combining schema information into the :table entry
+              # include it as a separate entry.
+              entry[:schema] = m.call(row[:schema])
+            end
           end
         end
-        ref_ds.each do |row|
-          r = h[row[:name]]
-          r[:table] ||= schema ? SQL::QualifiedIdentifier.new(m.call(row[:schema]), m.call(row[:table])) : m.call(row[:table])
-          r[:key] ||= []
-          r[:key] << m.call(row[:refcolumn])
-        end
+
         h.values
+      end
+
+      def freeze
+        server_version
+        supports_prepared_transactions?
+        @conversion_procs.freeze
+        super
       end
 
       # Use the pg_* system tables to determine indexes on a table
       def indexes(table, opts=OPTS)
         m = output_identifier_meth
-        range = 0...32
-        attnums = server_version >= 80100 ? SQL::Function.new(:ANY, :ind__indkey) : range.map{|x| SQL::Subscript.new(:ind__indkey, [x])}
-        ds = metadata_dataset.
-          from(:pg_class___tab).
-          join(:pg_index___ind, :indrelid=>:oid).
-          join(:pg_class___indc, :oid=>:indexrelid).
-          join(:pg_attribute___att, :attrelid=>:tab__oid, :attnum=>attnums).
-          left_join(:pg_constraint___con, :conname=>:indc__relname).
-          filter(:indc__relkind=>'i', :ind__indisprimary=>false, :indexprs=>nil, :indpred=>nil, :indisvalid=>true, :tab__oid=>regclass_oid(table, opts)).
-          order(:indc__relname, SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(:ind__indkey, [x]), x]}, 32, :att__attnum)).
-          select(:indc__relname___name, :ind__indisunique___unique, :att__attname___column, :con__condeferrable___deferrable)
+        oid = regclass_oid(table, opts)
 
-        ds.filter!(:indisready=>true, :indcheckxmin=>false) if server_version >= 80300
+        if server_version >= 90500
+          order = [Sequel[:indc][:relname], Sequel.function(:array_position, Sequel[:ind][:indkey], Sequel[:att][:attnum])]
+        else
+          range = 0...32
+          order = [Sequel[:indc][:relname], SQL::CaseExpression.new(range.map{|x| [SQL::Subscript.new(Sequel[:ind][:indkey], [x]), x]}, 32, Sequel[:att][:attnum])]
+        end
+
+        attnums = SQL::Function.new(:ANY, Sequel[:ind][:indkey])
+
+        ds = metadata_dataset.
+          from{pg_class.as(:tab)}.
+          join(Sequel[:pg_index].as(:ind), :indrelid=>:oid).
+          join(Sequel[:pg_class].as(:indc), :oid=>:indexrelid).
+          join(Sequel[:pg_attribute].as(:att), :attrelid=>Sequel[:tab][:oid], :attnum=>attnums).
+          left_join(Sequel[:pg_constraint].as(:con), :conname=>Sequel[:indc][:relname]).
+          where{{
+            indc[:relkind]=>'i',
+            ind[:indisprimary]=>false,
+            :indexprs=>nil,
+            :indisvalid=>true,
+            tab[:oid]=>oid}}.
+          order(*order).
+          select{[indc[:relname].as(:name), ind[:indisunique].as(:unique), att[:attname].as(:column), con[:condeferrable].as(:deferrable)]}
+
+        ds = ds.where(:indpred=>nil) unless opts[:include_partial]
+        ds = ds.where(:indisready=>true) if server_version >= 80300
+        ds = ds.where(:indislive=>true) if server_version >= 90300
 
         indexes = {}
         ds.each do |r|
@@ -365,7 +571,7 @@ module Sequel
 
       # Dataset containing all current database locks
       def locks
-        dataset.from(:pg_class).join(:pg_locks, :relation=>:relfilenode).select(:pg_class__relname, Sequel::SQL::ColumnAll.new(:pg_locks))
+        dataset.from(:pg_class).join(:pg_locks, :relation=>:relfilenode).select{[pg_class[:relname], Sequel::SQL::ColumnAll.new(:pg_locks)]}
       end
 
       # Notifies the given channel.  See the PostgreSQL NOTIFY documentation. Options:
@@ -421,28 +627,28 @@ module Sequel
         run "REFRESH MATERIALIZED VIEW#{' CONCURRENTLY' if opts[:concurrently]} #{quote_schema_table(name)}"
       end
       
-      # Reset the database's conversion procs, requires a server query if there
-      # any named types.
-      def reset_conversion_procs
-        @conversion_procs = get_conversion_procs
-        conversion_procs_updated
-        @conversion_procs
-      end
-
       # Reset the primary key sequence for the given table, basing it on the
       # maximum current value of the table's primary key.
       def reset_primary_key_sequence(table)
         return unless seq = primary_key_sequence(table)
         pk = SQL::Identifier.new(primary_key(table))
         db = self
-        seq_ds = db.from(LiteralString.new(seq))
         s, t = schema_and_table(table)
         table = Sequel.qualify(s, t) if s
-        get{setval(seq, db[table].select{coalesce(max(pk)+seq_ds.select{:increment_by}, seq_ds.select(:min_value))}, false)}
+
+        if server_version >= 100000
+          seq_ds = metadata_dataset.from(:pg_sequence).where(:seqrelid=>regclass_oid(LiteralString.new(seq)))
+          increment_by = :seqincrement
+          min_value = :seqmin
+        else
+          seq_ds = metadata_dataset.from(LiteralString.new(seq))
+          increment_by = :increment_by
+          min_value = :min_value
+        end
+
+        get{setval(seq, db[table].select(coalesce(max(pk)+seq_ds.select(increment_by), seq_ds.select(min_value))), false)}
       end
 
-      # Rollback an existing prepared transaction with the given transaction
-      # identifier string.
       def rollback_prepared_transaction(transaction_id, opts=OPTS)
         run("ROLLBACK PREPARED #{literal(transaction_id)}", opts)
       end
@@ -450,24 +656,16 @@ module Sequel
       # PostgreSQL uses SERIAL psuedo-type instead of AUTOINCREMENT for
       # managing incrementing primary keys.
       def serial_primary_key_options
-        {:primary_key => true, :serial => true, :type=>Integer}
+        auto_increment_key = server_version >= 100002 ? :identity : :serial
+        {:primary_key => true, auto_increment_key => true, :type=>Integer}
       end
 
       # The version of the PostgreSQL server, used for determining capability.
       def server_version(server=nil)
         return @server_version if @server_version
-        @server_version = synchronize(server) do |conn|
-          (conn.server_version rescue nil) if conn.respond_to?(:server_version)
-        end
-        unless @server_version
-          @server_version = if m = /PostgreSQL (\d+)\.(\d+)(?:(?:rc\d+)|\.(\d+))?/.match(fetch('SELECT version()').single_value)
-            (m[1].to_i * 10000) + (m[2].to_i * 100) + m[3].to_i
-          else
-            0
-          end
-        end
-        warn 'Sequel no longer supports PostgreSQL <8.2, some things may not work' if @server_version < 80200
-        @server_version
+        ds = dataset
+        ds = ds.server(server) if server
+        @server_version ||= ds.with_sql("SELECT CAST(current_setting('server_version_num') AS integer) AS v").single_value rescue 0
       end
 
       # PostgreSQL supports CREATE TABLE IF NOT EXISTS on 9.1+
@@ -538,17 +736,18 @@ module Sequel
       # Check whether the given type name string/symbol (e.g. :hstore) is supported by
       # the database.
       def type_supported?(type)
-        @supported_types ||= {}
-        @supported_types.fetch(type){@supported_types[type] = (from(:pg_type).filter(:typtype=>'b', :typname=>type.to_s).count > 0)}
+        Sequel.synchronize{return @supported_types[type] if @supported_types.has_key?(type)}
+        supported = from(:pg_type).where(:typtype=>'b', :typname=>type.to_s).count > 0
+        Sequel.synchronize{return @supported_types[type] = supported}
       end
 
       # Creates a dataset that uses the VALUES clause:
       #
       #   DB.values([[1, 2], [3, 4]])
-      #   VALUES ((1, 2), (3, 4))
+      #   # VALUES ((1, 2), (3, 4))
       #
       #   DB.values([[1, 2], [3, 4]]).order(:column2).limit(1, 1)
-      #   VALUES ((1, 2), (3, 4)) ORDER BY column2 LIMIT 1 OFFSET 1
+      #   # VALUES ((1, 2), (3, 4)) ORDER BY column2 LIMIT 1 OFFSET 1
       def values(v)
         @default_dataset.clone(:values=>v)
       end
@@ -556,28 +755,22 @@ module Sequel
       # Array of symbols specifying view names in the current database.
       #
       # Options:
+      # :materialized :: Return materialized views
       # :qualify :: Return the views as Sequel::SQL::QualifiedIdentifier instances,
       #             using the schema the view is located in as the qualifier.
       # :schema :: The schema to search
       # :server :: The server to use
       def views(opts=OPTS)
-        pg_class_relname('v', opts)
+        relkind = opts[:materialized] ? 'm' : 'v'
+        pg_class_relname(relkind, opts)
       end
 
       private
 
-      # Do a type name-to-oid lookup using the database and update the procs
-      # with the related proc if the database supports the type.
-      def add_named_conversion_procs(procs, named_procs)
-        unless (named_procs).empty?
-          convert_named_procs_to_procs(named_procs).each do |oid, pr|
-            procs[oid] ||= pr
-          end
-          conversion_procs_updated
-        end
+      def alter_table_add_column_sql(table, op)
+        "ADD COLUMN#{' IF NOT EXISTS' if op[:if_not_exists]} #{column_definition_sql(op)}"
       end
 
-      # Use a PostgreSQL-specific alter table generator
       def alter_table_generator_class
         Postgres::AlterTableGenerator
       end
@@ -637,9 +830,20 @@ module Sequel
         end
       end
 
+      # Support identity columns, but only use the identity SQL syntax if no
+      # default value is given.
+      def column_definition_default_sql(sql, column)
+        super
+        if !column[:serial] && !['serial', 'bigserial'].include?(column[:type].to_s) && !column[:default] && (identity = column[:identity])
+          sql << " GENERATED "
+          sql << (identity == :always ? "ALWAYS" : "BY DEFAULT")
+          sql << " AS IDENTITY"
+        end
+      end
+
       # Handle PostgreSQL specific default format.
       def column_schema_normalize_default(default, type)
-        if m = POSTGRES_DEFAULT_RE.match(default)
+        if m = /\A(?:B?('.*')::[^']+|\((-?\d+(?:\.\d+)?)\))\z/.match(default)
           default = m[1] || m[2]
         end
         super(default, type)
@@ -661,14 +865,15 @@ module Sequel
         (super || op[:op] == :validate_constraint) && op[:op] != :rename_column
       end
 
-      VALID_CLIENT_MIN_MESSAGES = %w'DEBUG5 DEBUG4 DEBUG3 DEBUG2 DEBUG1 LOG NOTICE WARNING ERROR FATAL PANIC'.freeze
+      VALID_CLIENT_MIN_MESSAGES = %w'DEBUG5 DEBUG4 DEBUG3 DEBUG2 DEBUG1 LOG NOTICE WARNING ERROR FATAL PANIC'.freeze.each(&:freeze)
       # The SQL queries to execute when starting a new connection.
-      def connection_configuration_sqls
+      def connection_configuration_sqls(opts=@opts)
         sqls = []
 
-        sqls << "SET standard_conforming_strings = ON" if typecast_value_boolean(@opts.fetch(:force_standard_strings, Postgres.force_standard_strings))
+        sqls << "SET standard_conforming_strings = ON" if typecast_value_boolean(opts.fetch(:force_standard_strings, true))
 
-        if (cmm = @opts.fetch(:client_min_messages, Postgres.client_min_messages)) && !cmm.to_s.empty?
+        cmm = opts.fetch(:client_min_messages, :warning)
+        if cmm && !cmm.to_s.empty?
           cmm = cmm.to_s.upcase.strip
           unless VALID_CLIENT_MIN_MESSAGES.include?(cmm)
             raise Error, "Unsupported client_min_messages setting: #{cmm}"
@@ -676,7 +881,7 @@ module Sequel
           sqls << "SET client_min_messages = '#{cmm.to_s.upcase}'"
         end
 
-        if search_path = @opts[:search_path]
+        if search_path = opts[:search_path]
           case search_path
           when String
             search_path = search_path.split(",").map(&:strip)
@@ -711,37 +916,13 @@ module Sequel
         end
       end
 
-      # Callback used when conversion procs are updated.
-      def conversion_procs_updated
-        nil
-      end
-
-      # Convert the hash of named conversion procs into a hash a oid conversion procs. 
-      def convert_named_procs_to_procs(named_procs)
-        h = {}
-        from(:pg_type).where(:typtype=>['b', 'e'], :typname=>named_procs.keys.map(&:to_s)).select_map([:oid, :typname]).each do |oid, name|
-          h[oid.to_i] = named_procs[name.untaint.to_sym]
-        end
-        h
-      end
-
-      # Copy the conversion procs related to the given oids from PG_TYPES into
-      # the conversion procs for this instance.
-      def copy_conversion_procs(oids)
-        procs = conversion_procs
-        oids.each do |oid|
-          procs[oid] = PG_TYPES[oid]
-        end
-        conversion_procs_updated
-      end
-
-      EXCLUSION_CONSTRAINT_SQL_STATE = '23P01'.freeze
-      DEADLOCK_SQL_STATE = '40P01'.freeze
       def database_specific_error_class_from_sqlstate(sqlstate)
-        if sqlstate == EXCLUSION_CONSTRAINT_SQL_STATE
+        if sqlstate == '23P01'
           ExclusionConstraintViolation
-        elsif sqlstate == DEADLOCK_SQL_STATE
+        elsif sqlstate == '40P01'
           SerializationFailure
+        elsif sqlstate == '55P03'
+          DatabaseLockTimeout
         else
           super
         end
@@ -757,6 +938,7 @@ module Sequel
         [/violates not-null constraint/, NotNullConstraintViolation],
         [/conflicting key value violates exclusion constraint/, ExclusionConstraintViolation],
         [/could not serialize access/, SerializationFailure],
+        [/could not obtain lock on row in relation/, DatabaseLockTimeout],
       ].freeze
       def database_error_regexps
         DATABASE_ERROR_REGEXPS
@@ -841,7 +1023,7 @@ module Sequel
           raise(Error, "can't provide both :foreign and :unlogged to create_table") if options[:unlogged]
           'FOREIGN '
         elsif options[:unlogged]
-          UNLOGGED
+          'UNLOGGED '
         end
 
         "CREATE #{prefix_sql}TABLE#{' IF NOT EXISTS' if options[:if_not_exists]} #{options[:temp] ? quote_identifier(name) : quote_schema_table(name)}"
@@ -878,7 +1060,6 @@ module Sequel
         result += " AS #{sql}"
       end
 
-      # Use a PostgreSQL-specific create table generator
       def create_table_generator_class
         Postgres::CreateTableGenerator
       end
@@ -897,11 +1078,6 @@ module Sequel
       # DDL fragment for initial part of CREATE VIEW statement
       def create_view_prefix_sql(name, options)
         create_view_sql_append_columns("CREATE #{'OR REPLACE 'if options[:replace]}#{'TEMPORARY 'if options[:temp]}#{'RECURSIVE ' if options[:recursive]}#{'MATERIALIZED ' if options[:materialized]}VIEW #{quote_schema_table(name)}", options[:columns] || options[:recursive])
-      end
-
-      # The errors that the main adapters can raise, depends on the adapter being used
-      def database_error_classes
-        CONVERTED_EXCEPTIONS
       end
 
       # SQL for dropping a function from the database.
@@ -940,36 +1116,17 @@ module Sequel
         "DROP #{'MATERIALIZED ' if opts[:materialized]}VIEW#{' IF EXISTS' if opts[:if_exists]} #{quote_schema_table(name)}#{' CASCADE' if opts[:cascade]}"
       end
 
-      # If opts includes a :schema option, or a default schema is used, restrict the dataset to
-      # that schema.  Otherwise, just exclude the default PostgreSQL schemas except for public.
+      # If opts includes a :schema option, use it, otherwise restrict the filter to only the
+      # currently visible schemas.
       def filter_schema(ds, opts)
         expr = if schema = opts[:schema]
           schema.to_s
         else
           Sequel.function(:any, Sequel.function(:current_schemas, false))
         end
-        ds.where(:pg_namespace__nspname=>expr)
+        ds.where{{pg_namespace[:nspname]=>expr}}
       end
 
-      # Return a hash with oid keys and callable values, used for converting types.
-      def get_conversion_procs
-        procs = PG_TYPES.dup
-        procs[1184] = procs[1114] = method(:to_application_timestamp)
-        add_named_conversion_procs(procs, PG_NAMED_TYPES)
-        procs
-      end
-
-      # PostgreSQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on input.
-      def identifier_input_method_default
-        nil
-      end
-
-      # PostgreSQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on output.
-      def identifier_output_method_default
-        nil
-      end
-
-      # PostgreSQL specific index SQL.
       def index_definition_sql(table_name, index)
         cols = index[:columns]
         index_name = index[:name] || default_index_name(table_name, cols)
@@ -978,6 +1135,7 @@ module Sequel
         else
           literal(Array(cols))
         end
+        if_not_exists = " IF NOT EXISTS" if index[:if_not_exists]
         unique = "UNIQUE " if index[:unique]
         index_type = index[:type]
         filter = index[:where] || index[:filter]
@@ -989,33 +1147,33 @@ module Sequel
         when :spatial
           index_type = :gist
         end
-        "CREATE #{unique}INDEX#{' CONCURRENTLY' if index[:concurrently]} #{quote_identifier(index_name)} ON #{quote_schema_table(table_name)} #{"USING #{index_type} " if index_type}#{expr}#{filter}"
+        "CREATE #{unique}INDEX#{' CONCURRENTLY' if index[:concurrently]}#{if_not_exists} #{quote_identifier(index_name)} ON #{quote_schema_table(table_name)} #{"USING #{index_type} " if index_type}#{expr}#{filter}"
       end
 
       # Setup datastructures shared by all postgres adapters.
       def initialize_postgres_adapter
         @primary_keys = {}
         @primary_key_sequences = {}
-        @conversion_procs = PG_TYPES.dup
-        reset_conversion_procs
+        @supported_types = {}
+        procs = @conversion_procs = CONVERSION_PROCS.dup
+        procs[1184] = procs[1114] = method(:to_application_timestamp)
       end
 
       # Backbone of the tables and views support.
       def pg_class_relname(type, opts)
-        ds = metadata_dataset.from(:pg_class).filter(:relkind=>type).select(:relname).server(opts[:server]).join(:pg_namespace, :oid=>:relnamespace)
+        ds = metadata_dataset.from(:pg_class).where(:relkind=>type).select(:relname).server(opts[:server]).join(:pg_namespace, :oid=>:relnamespace)
         ds = filter_schema(ds, opts)
         m = output_identifier_meth
         if block_given?
           yield(ds)
         elsif opts[:qualify]
-          ds.select_append(:pg_namespace__nspname).map{|r| Sequel.qualify(m.call(r[:nspname]), m.call(r[:relname]))}
+          ds.select_append{pg_namespace[:nspname]}.map{|r| Sequel.qualify(m.call(r[:nspname]).to_s, m.call(r[:relname]).to_s)}
         else
           ds.map{|r| m.call(r[:relname])}
         end
       end
 
-      # Use a dollar sign instead of question mark for the argument
-      # placeholder.
+      # Use a dollar sign instead of question mark for the argument placeholder.
       def prepared_arg_placeholder
         PREPARED_ARG_PLACEHOLDER
       end
@@ -1042,8 +1200,7 @@ module Sequel
         Sequel.cast(expr.to_s,:regclass).cast(:oid)
       end
 
-      # Remove the cached entries for primary keys and sequences when a table is
-      # changed.
+      # Remove the cached entries for primary keys and sequences when a table is changed.
       def remove_cached_schema(table)
         tab = quote_schema_table(table)
         Sequel.synchronize do
@@ -1059,7 +1216,6 @@ module Sequel
         "ALTER TABLE #{quote_schema_table(name)} RENAME TO #{quote_identifier(schema_and_table(new_name).last)}"
       end
 
-      # Recognize PostgreSQL interval type.
       def schema_column_type(db_type)
         case db_type
         when /\Ainterval\z/io
@@ -1074,24 +1230,31 @@ module Sequel
       # The dataset used for parsing table schemas, using the pg_* system catalogs.
       def schema_parse_table(table_name, opts)
         m = output_identifier_meth(opts[:dataset])
-        ds = metadata_dataset.select(:pg_attribute__attname___name,
-            SQL::Cast.new(:pg_attribute__atttypid, :integer).as(:oid),
-            SQL::Cast.new(:basetype__oid, :integer).as(:base_oid),
-            SQL::Function.new(:format_type, :basetype__oid, :pg_type__typtypmod).as(:db_base_type),
-            SQL::Function.new(:format_type, :pg_type__oid, :pg_attribute__atttypmod).as(:db_type),
-            SQL::Function.new(:pg_get_expr, :pg_attrdef__adbin, :pg_class__oid).as(:default),
-            SQL::BooleanExpression.new(:NOT, :pg_attribute__attnotnull).as(:allow_null),
-            SQL::Function.new(:COALESCE, SQL::BooleanExpression.from_value_pairs(:pg_attribute__attnum => SQL::Function.new(:ANY, :pg_index__indkey)), false).as(:primary_key)).
+        oid = regclass_oid(table_name, opts)
+        ds = metadata_dataset.select{[
+            pg_attribute[:attname].as(:name),
+            SQL::Cast.new(pg_attribute[:atttypid], :integer).as(:oid),
+            SQL::Cast.new(basetype[:oid], :integer).as(:base_oid),
+            SQL::Function.new(:format_type, basetype[:oid], pg_type[:typtypmod]).as(:db_base_type),
+            SQL::Function.new(:format_type, pg_type[:oid], pg_attribute[:atttypmod]).as(:db_type),
+            SQL::Function.new(:pg_get_expr, pg_attrdef[:adbin], pg_class[:oid]).as(:default),
+            SQL::BooleanExpression.new(:NOT, pg_attribute[:attnotnull]).as(:allow_null),
+            SQL::Function.new(:COALESCE, SQL::BooleanExpression.from_value_pairs(pg_attribute[:attnum] => SQL::Function.new(:ANY, pg_index[:indkey])), false).as(:primary_key)]}.
           from(:pg_class).
           join(:pg_attribute, :attrelid=>:oid).
           join(:pg_type, :oid=>:atttypid).
-          left_outer_join(:pg_type___basetype, :oid=>:typbasetype).
-          left_outer_join(:pg_attrdef, :adrelid=>:pg_class__oid, :adnum=>:pg_attribute__attnum).
-          left_outer_join(:pg_index, :indrelid=>:pg_class__oid, :indisprimary=>true).
-          filter(:pg_attribute__attisdropped=>false).
-          filter{|o| o.pg_attribute__attnum > 0}.
-          filter(:pg_class__oid=>regclass_oid(table_name, opts)).
-          order(:pg_attribute__attnum)
+          left_outer_join(Sequel[:pg_type].as(:basetype), :oid=>:typbasetype).
+          left_outer_join(:pg_attrdef, :adrelid=>Sequel[:pg_class][:oid], :adnum=>Sequel[:pg_attribute][:attnum]).
+          left_outer_join(:pg_index, :indrelid=>Sequel[:pg_class][:oid], :indisprimary=>true).
+          where{{pg_attribute[:attisdropped]=>false}}.
+          where{pg_attribute[:attnum] > 0}.
+          where{{pg_class[:oid]=>oid}}.
+          order{pg_attribute[:attnum]}
+
+        if server_version > 100000
+          ds = ds.select_append{pg_attribute[:attidentity]}
+        end
+
         ds.map do |row|
           row[:default] = nil if blank_object?(row[:default])
           if row[:base_oid]
@@ -1104,8 +1267,9 @@ module Sequel
             row.delete(:db_base_type)
           end
           row[:type] = schema_column_type(row[:db_type])
+          identity = row.delete(:attidentity)
           if row[:primary_key]
-            row[:auto_increment] = !!(row[:default] =~ /\Anextval/io)
+            row[:auto_increment] = !!(row[:default] =~ /\A(?:nextval)/i) || identity == 'a' || identity == 'd'
           end
           [m.call(row.delete(:name)), row]
         end
@@ -1142,7 +1306,7 @@ module Sequel
       end
 
       # Handle bigserial type if :serial option is present
-      def type_literal_generic_bignum(column)
+      def type_literal_generic_bignum_symbol(column)
         column[:serial] ? :bigserial : super
       end
 
@@ -1159,7 +1323,7 @@ module Sequel
       # PostgreSQL prefers the text datatype.  If a fixed size is requested,
       # the char type is used.  If the text type is specifically
       # disallowed or there is a size specified, use the varchar type.
-      # Otherwise use the type type.
+      # Otherwise use the text type.
       def type_literal_generic_string(column)
         if column[:fixed]
           "char(#{column[:size]||255})"
@@ -1176,72 +1340,16 @@ module Sequel
       end
     end
 
-    # Instance methods for datasets that connect to a PostgreSQL database.
     module DatasetMethods
-      ACCESS_SHARE = 'ACCESS SHARE'.freeze
-      ACCESS_EXCLUSIVE = 'ACCESS EXCLUSIVE'.freeze
-      BOOL_FALSE = 'false'.freeze
-      BOOL_TRUE = 'true'.freeze
-      COMMA_SEPARATOR = ', '.freeze
-      EXCLUSIVE = 'EXCLUSIVE'.freeze
-      EXPLAIN = 'EXPLAIN '.freeze
-      EXPLAIN_ANALYZE = 'EXPLAIN ANALYZE '.freeze
-      FOR_SHARE = ' FOR SHARE'.freeze
+      include UnmodifiedIdentifiers::DatasetMethods
+
       NULL = LiteralString.new('NULL').freeze
-      PG_TIMESTAMP_FORMAT = "TIMESTAMP '%Y-%m-%d %H:%M:%S".freeze
-      QUERY_PLAN = 'QUERY PLAN'.to_sym
-      ROW_EXCLUSIVE = 'ROW EXCLUSIVE'.freeze
-      ROW_SHARE = 'ROW SHARE'.freeze
-      SHARE = 'SHARE'.freeze
-      SHARE_ROW_EXCLUSIVE = 'SHARE ROW EXCLUSIVE'.freeze
-      SHARE_UPDATE_EXCLUSIVE = 'SHARE UPDATE EXCLUSIVE'.freeze
-      SQL_WITH_RECURSIVE = "WITH RECURSIVE ".freeze
-      SPACE = Dataset::SPACE
-      FROM = Dataset::FROM
-      APOS = Dataset::APOS
-      APOS_RE = Dataset::APOS_RE
-      DOUBLE_APOS = Dataset::DOUBLE_APOS
-      PAREN_OPEN = Dataset::PAREN_OPEN
-      PAREN_CLOSE = Dataset::PAREN_CLOSE
-      COMMA = Dataset::COMMA
-      ESCAPE = Dataset::ESCAPE
-      BACKSLASH = Dataset::BACKSLASH
-      AS = Dataset::AS
-      XOR_OP = ' # '.freeze
-      CRLF = "\r\n".freeze
-      BLOB_RE = /[\000-\037\047\134\177-\377]/n.freeze
-      WINDOW = " WINDOW ".freeze
-      SELECT_VALUES = "VALUES ".freeze
-      EMPTY_STRING = ''.freeze
-      LOCK_MODES = ['ACCESS SHARE', 'ROW SHARE', 'ROW EXCLUSIVE', 'SHARE UPDATE EXCLUSIVE', 'SHARE', 'SHARE ROW EXCLUSIVE', 'EXCLUSIVE', 'ACCESS EXCLUSIVE'].each(&:freeze)
-      SKIP_LOCKED = " SKIP LOCKED".freeze
+      LOCK_MODES = ['ACCESS SHARE', 'ROW SHARE', 'ROW EXCLUSIVE', 'SHARE UPDATE EXCLUSIVE', 'SHARE', 'SHARE ROW EXCLUSIVE', 'EXCLUSIVE', 'ACCESS EXCLUSIVE'].each(&:freeze).freeze
 
       Dataset.def_sql_method(self, :delete, [['if server_version >= 90100', %w'with delete from using where returning'], ['else', %w'delete from using where returning']])
       Dataset.def_sql_method(self, :insert, [['if server_version >= 90500', %w'with insert into columns values conflict returning'], ['elsif server_version >= 90100', %w'with insert into columns values returning'], ['else', %w'insert into columns values returning']])
       Dataset.def_sql_method(self, :select, [['if opts[:values]', %w'values order limit'], ['elsif server_version >= 80400', %w'with select distinct columns from join where group having window compounds order limit lock'], ['else', %w'select distinct columns from join where group having compounds order limit lock']])
       Dataset.def_sql_method(self, :update, [['if server_version >= 90100', %w'with update table set from where returning'], ['else', %w'update table set from where returning']])
-
-      # Shared methods for prepared statements when used with PostgreSQL databases.
-      module PreparedStatementMethods
-        # Override insert action to use RETURNING if the server supports it.
-        def run
-          if @prepared_type == :insert && (opts[:returning_pk] || !opts[:returning])
-            fetch_rows(prepared_sql){|r| return r.values.first}
-          else
-            super
-          end
-        end
-
-        def prepared_sql
-          return @prepared_sql if @prepared_sql
-          if @prepared_type == :insert && !opts[:returning]
-            @opts[:returning] = insert_pk
-            @opts[:returning_pk] = true
-          end
-          super
-          @prepared_sql
-        end
-      end
 
       # Return the results of an EXPLAIN ANALYZE query as a string
       def analyze
@@ -1254,7 +1362,7 @@ module Sequel
       def complex_expression_sql_append(sql, op, args)
         case op
         when :^
-          j = XOR_OP
+          j = ' # '
           c = false
           args.each do |a|
             sql << j if c
@@ -1262,13 +1370,13 @@ module Sequel
             c ||= true
           end
         when :ILIKE, :'NOT ILIKE'
-          sql << PAREN_OPEN
-          literal_append(sql, args.at(0))
-          sql << SPACE << op.to_s << SPACE
-          literal_append(sql, args.at(1))
-          sql << ESCAPE
-          literal_append(sql, BACKSLASH)
-          sql << PAREN_CLOSE
+          sql << '('
+          literal_append(sql, args[0])
+          sql << ' ' << op.to_s << ' '
+          literal_append(sql, args[1])
+          sql << " ESCAPE "
+          literal_append(sql, "\\")
+          sql << ')'
         else
           super
         end
@@ -1294,7 +1402,7 @@ module Sequel
 
       # Return the results of an EXPLAIN query as a string
       def explain(opts=OPTS)
-        with_sql((opts[:analyze] ? EXPLAIN_ANALYZE : EXPLAIN) + select_sql).map(QUERY_PLAN).join(CRLF)
+        with_sql((opts[:analyze] ? 'EXPLAIN ANALYZE ' : 'EXPLAIN ') + select_sql).map(:'QUERY PLAN').join("\r\n")
       end
 
       # Return a cloned dataset which will use FOR SHARE to lock returned rows.
@@ -1315,6 +1423,8 @@ module Sequel
       # :phrase :: Similar to :plain, but also adding an ILIKE filter to ensure that
       #            returned rows also include the exact phrase used.
       # :rank :: Set to true to order by the rank, so that closer matches are returned first.
+      # :to_tsquery :: Can be set to :plain or :phrase to specify the function to use to
+      #                convert the terms to a ts_query.
       # :tsquery :: Specifies the terms argument is already a valid SQL expression returning a
       #             tsquery, and can be used directly in the query.
       # :tsvector :: Specifies the cols argument is already a valid SQL expression returning a
@@ -1329,11 +1439,18 @@ module Sequel
 
         unless opts[:tsquery]
           phrase_terms = terms.is_a?(Array) ? terms.join(' | ') : terms
-          query_func = (opts[:phrase] || opts[:plain]) ? :plainto_tsquery : :to_tsquery
+
+          query_func = case to_tsquery = opts[:to_tsquery]
+          when :phrase, :plain
+            :"#{to_tsquery}to_tsquery"
+          else
+            (opts[:phrase] || opts[:plain]) ? :plainto_tsquery : :to_tsquery
+          end
+
           terms = Sequel.function(query_func, lang, phrase_terms)
         end
 
-        ds = where(Sequel.lit(["(", " @@ ", ")"], cols, terms))
+        ds = where(Sequel.lit(["", " @@ ", ""], cols, terms))
 
         if opts[:phrase]
           raise Error, "can't use :phrase with either :tsvector or :tsquery arguments to full_text_search together" if opts[:tsvector] || opts[:tsquery]
@@ -1370,6 +1487,7 @@ module Sequel
 
       # Handle uniqueness violations when inserting, by updating the conflicting row, using
       # ON CONFLICT. With no options, uses ON CONFLICT DO NOTHING.  Options:
+      # :conflict_where :: The index filter, when using a partial index to determine uniqueness.
       # :constraint :: An explicit constraint name, has precendence over :target.
       # :target :: The column name or expression to handle uniqueness violations on.
       # :update :: A hash of columns and values to set.  Uses ON CONFLICT DO UPDATE.
@@ -1377,24 +1495,28 @@ module Sequel
       #
       # Examples:
       #
-      #   DB[:table].insert_conflict.insert(:a=>1, :b=>2)
+      #   DB[:table].insert_conflict.insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT DO NOTHING
       #   
-      #   DB[:table].insert_conflict(:constraint=>:table_a_uidx).insert(:a=>1, :b=>2)
+      #   DB[:table].insert_conflict(constraint: :table_a_uidx).insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT ON CONSTRAINT table_a_uidx DO NOTHING
       #   
-      #   DB[:table].insert_conflict(:target=>:a).insert(:a=>1, :b=>2)
+      #   DB[:table].insert_conflict(target: :a).insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT (a) DO NOTHING
+      #
+      #   DB[:table].insert_conflict(target: :a, conflict_where: {c: true}).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT (a) WHERE (c IS TRUE) DO NOTHING
       #   
-      #   DB[:table].insert_conflict(:target=>:a, :update=>{:b=>:excluded__b}).insert(:a=>1, :b=>2)
+      #   DB[:table].insert_conflict(target: :a, update: {b: Sequel[:excluded][:b]}).insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT (a) DO UPDATE SET b = excluded.b
       #   
-      #   DB[:table].insert_conflict(:constraint=>:table_a_uidx,
-      #     :update=>{:b=>:excluded__b}, :update_where=>{:table__status_id=>1}).insert(:a=>1, :b=>2)
+      #   DB[:table].insert_conflict(constraint: :table_a_uidx,
+      #     update: {b: Sequel[:excluded][:b]}, update_where: {Sequel[:table][:status_id] => 1}).insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT ON CONSTRAINT table_a_uidx
       #   # DO UPDATE SET b = excluded.b WHERE (table.status_id = 1)
@@ -1405,18 +1527,20 @@ module Sequel
       # Ignore uniqueness/exclusion violations when inserting, using ON CONFLICT DO NOTHING.
       # Exists mostly for compatibility to MySQL's insert_ignore. Example:
       #
-      #   DB[:table].insert_ignore.insert(:a=>1, :b=>2)
+      #   DB[:table].insert_ignore.insert(a: 1, b: 2)
       #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
       #   # ON CONFLICT DO NOTHING
       def insert_ignore
         insert_conflict
       end
 
-      # Insert a record returning the record inserted.  Always returns nil without
-      # inserting a query if disable_insert_returning is used.
+      # Insert a record, returning the record inserted, using RETURNING.  Always returns nil without
+      # running an INSERT statement if disable_insert_returning is used.  If the query runs
+      # but returns no values, returns false.
       def insert_select(*values)
         return unless supports_insert_select?
-        server?(:default).with_sql_first(insert_select_sql(*values))
+        # Handle case where query does not return a row
+        server?(:default).with_sql_first(insert_select_sql(*values)) || false
       end
 
       # The SQL to use for an insert_select, adds a RETURNING clause to the insert
@@ -1428,7 +1552,7 @@ module Sequel
 
       # Locks all tables in the dataset's FROM clause (but not in JOINs) with
       # the specified mode (e.g. 'EXCLUSIVE').  If a block is given, starts
-      # a new transaction, locks the table, and yields.  If a block is not given
+      # a new transaction, locks the table, and yields.  If a block is not given,
       # just locks the tables.  Note that PostgreSQL will probably raise an error
       # if you lock the table outside of an existing transaction.  Returns nil.
       def lock(mode, opts=OPTS)
@@ -1445,6 +1569,19 @@ module Sequel
           @db.execute(sql, opts)
         end
         nil
+      end
+
+      # Use OVERRIDING USER VALUE for INSERT statements, so that identity columns
+      # always use the user supplied value, and an error is not raised for identity
+      # columns that are GENERATED ALWAYS.
+      def overriding_system_value
+        clone(:override=>:system)
+      end
+
+      # Use OVERRIDING USER VALUE for INSERT statements, so that identity columns
+      # always use the sequence value instead of the user supplied value.
+      def overriding_user_value
+        clone(:override=>:user)
       end
 
       def supports_cte?(type=:select)
@@ -1491,13 +1628,18 @@ module Sequel
         server_version >= 90500
       end
 
-      # PostgreSQL 9.3rc1+ supports lateral subqueries
+      # PostgreSQL 9.3+ supports lateral subqueries
       def supports_lateral_subqueries?
         server_version >= 90300
       end
       
       # PostgreSQL supports modifying joined datasets
       def supports_modifying_joins?
+        true
+      end
+
+      # PostgreSQL supports NOWAIT.
+      def supports_nowait?
         true
       end
 
@@ -1537,10 +1679,11 @@ module Sequel
       # :only and :restart only work correctly on PostgreSQL 8.4+.
       #
       # Usage:
-      #   DB[:table].truncate # TRUNCATE TABLE "table"
-      #   # => nil
-      #   DB[:table].truncate(:cascade => true, :only=>true, :restart=>true) # TRUNCATE TABLE ONLY "table" RESTART IDENTITY CASCADE
-      #   # => nil
+      #   DB[:table].truncate
+      #   # TRUNCATE TABLE "table"
+      #
+      #   DB[:table].truncate(cascade: true, only: true, restart: true)
+      #   # TRUNCATE TABLE ONLY "table" RESTART IDENTITY CASCADE
       def truncate(opts = OPTS)
         if opts.empty?
           super()
@@ -1549,7 +1692,9 @@ module Sequel
         end
       end
 
-      # Return a clone of the dataset with an addition named window that can be referenced in window functions.
+      # Return a clone of the dataset with an addition named window that can be
+      # referenced in window functions. See {SQL::Window} for a list of options
+      # that can be passed in.
       def window(name, opts)
         clone(:window=>(@opts[:window]||[]) + [[name, SQL::Window.new(opts)]])
       end
@@ -1577,7 +1722,7 @@ module Sequel
 
       # Format TRUNCATE statement with PostgreSQL specific options.
       def _truncate_sql(table)
-        to = @opts[:truncate_opts] || {}
+        to = @opts[:truncate_opts] || OPTS
         "TRUNCATE TABLE#{' ONLY' if to[:only]} #{table}#{' RESTART IDENTITY' if to[:restart]}#{' CASCADE' if to[:cascade]}"
       end
 
@@ -1589,7 +1734,7 @@ module Sequel
 
       # Only include the primary table in the main delete clause
       def delete_from_sql(sql)
-        sql << FROM
+        sql << ' FROM '
         source_list_append(sql, @opts[:from][0..0])
       end
 
@@ -1609,19 +1754,22 @@ module Sequel
           elsif target = opts[:target]
             sql << ' '
             identifier_append(sql, Array(target))
+            if conflict_where = opts[:conflict_where]
+              sql << " WHERE "
+              literal_append(sql, conflict_where)
+            end
           end
 
           if values = opts[:update]
             sql << " DO UPDATE SET "
             update_sql_values_hash(sql, values)
-            if where = opts[:update_where]
+            if update_where = opts[:update_where]
               sql << " WHERE "
-              literal_append(sql, where)
+              literal_append(sql, update_where)
             end
           else
             sql << " DO NOTHING"
           end
-
         end
       end
 
@@ -1637,13 +1785,24 @@ module Sequel
         end
       end
 
+      # Support OVERRIDING SYSTEM|USER VALUE in insert statements
+      def insert_values_sql(sql)
+        case opts[:override]
+        when :system
+          sql << " OVERRIDING SYSTEM VALUE"
+        when :user
+          sql << " OVERRIDING USER VALUE"
+        end
+        super
+      end
+
       # For multiple table support, PostgreSQL requires at least
       # two from tables, with joins allowed.
       def join_from_sql(type, sql)
         if(from = @opts[:from][1..-1]).empty?
           raise(Error, 'Need multiple FROM tables if updating/deleting a dataset with JOINs') if @opts[:join]
         else
-          sql << SPACE << type.to_s << SPACE
+          sql << ' ' << type.to_s << ' '
           source_list_append(sql, from)
           select_join_sql(sql)
         end
@@ -1651,12 +1810,12 @@ module Sequel
 
       # Use a generic blob quoting method, hopefully overridden in one of the subadapter methods
       def literal_blob_append(sql, v)
-        sql << APOS << v.gsub(BLOB_RE){|b| "\\#{("%o" % b[0..1].unpack("C")[0]).rjust(3, '0')}"} << APOS
+        sql << "'" << v.gsub(/[\000-\037\047\134\177-\377]/n){|b| "\\#{("%o" % b[0..1].unpack("C")[0]).rjust(3, '0')}"} << "'"
       end
 
       # PostgreSQL uses FALSE for false values
       def literal_false
-        BOOL_FALSE
+        'false'
       end
       
       # PostgreSQL quotes NaN and Infinity.
@@ -1674,12 +1833,12 @@ module Sequel
 
       # Assume that SQL standard quoting is on, per Sequel's defaults
       def literal_string_append(sql, v)
-        sql << APOS << v.gsub(APOS_RE, DOUBLE_APOS) << APOS
+        sql << "'" << v.gsub("'", "''") << "'"
       end
 
-      # PostgreSQL uses FALSE for false values
+      # PostgreSQL uses true for true values
       def literal_true
-        BOOL_TRUE
+        'true'
       end
 
       # PostgreSQL supports multiple rows in INSERT.
@@ -1687,41 +1846,57 @@ module Sequel
         :values
       end
 
+      # Dataset options that do not affect the generated SQL.
+      def non_sql_option?(key)
+        super || key == :cursor || key == :insert_conflict
+      end
+
       # PostgreSQL requires parentheses around compound datasets if they use
       # CTEs, and using them in other places doesn't hurt.
       def compound_dataset_sql_append(sql, ds)
-        sql << PAREN_OPEN
+        sql << '('
         super
-        sql << PAREN_CLOSE
+        sql << ')'
+      end
+
+      # Backslash is supported by default as the escape character on PostgreSQL,
+      # and using ESCAPE can break LIKE ANY() usage.
+      def requires_like_escape?
+        false
       end
 
       # Support FOR SHARE locking when using the :share lock style.
       # Use SKIP LOCKED if skipping locked rows.
       def select_lock_sql(sql)
-        if @opts[:lock] == :share
-          sql << FOR_SHARE
+        lock = @opts[:lock]
+        if lock == :share
+          sql << ' FOR SHARE'
         else
           super
         end
 
-        if @opts[:skip_locked]
-          sql << SKIP_LOCKED
+        if lock
+          if @opts[:skip_locked]
+            sql << " SKIP LOCKED"
+          elsif @opts[:nowait]
+            sql << " NOWAIT"
+          end
         end
       end
 
       # Support VALUES clause instead of the SELECT clause to return rows.
       def select_values_sql(sql)
-        sql << SELECT_VALUES
+        sql << "VALUES "
         expression_list_append(sql, opts[:values])
       end
 
       # SQL fragment for named window specifications
       def select_window_sql(sql)
         if ws = @opts[:window]
-          sql << WINDOW
+          sql << " WINDOW "
           c = false
-          co = COMMA
-          as = AS
+          co = ', '
+          as = ' AS '
           ws.map do |name, window|
             sql << co if c
             literal_append(sql, name)
@@ -1734,7 +1909,7 @@ module Sequel
 
       # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
       def select_with_sql_base
-        opts[:with].any?{|w| w[:recursive]} ? SQL_WITH_RECURSIVE : super
+        opts[:with].any?{|w| w[:recursive]} ? "WITH RECURSIVE " : super
       end
 
       # The version of the database server
@@ -1747,10 +1922,18 @@ module Sequel
         true
       end
 
+      def to_prepared_statement(type, *a)
+        if type == :insert && !@opts.has_key?(:returning)
+          returning(insert_pk).send(:to_prepared_statement, :insert_pk, *a)
+        else
+          super
+        end
+      end
+
       # Concatenate the expressions with a space in between
       def full_text_string_join(cols)
-        cols = Array(cols).map{|x| SQL::Function.new(:COALESCE, x, EMPTY_STRING)}
-        cols = cols.zip([SPACE] * cols.length).flatten
+        cols = Array(cols).map{|x| SQL::Function.new(:COALESCE, x, '')}
+        cols = cols.zip([' '] * cols.length).flatten
         cols.pop
         SQL::StringExpression.new(:'||', *cols)
       end
@@ -1762,7 +1945,7 @@ module Sequel
 
       # Only include the primary table in the main update clause
       def update_table_sql(sql)
-        sql << SPACE
+        sql << ' '
         source_list_append(sql, @opts[:from][0..0])
       end
     end

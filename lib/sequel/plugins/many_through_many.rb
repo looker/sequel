@@ -46,18 +46,18 @@ module Sequel
     #   Artist.many_through_many :artists, [[:albums_artists, :artist_id, :album_id], [:albums_artists, :album_id, :artist_id]]
     #
     #   # All albums by artists that are associated to any album that this artist is associated to
-    #   Artist.many_through_many :artist_albums, [[:albums_artists, :artist_id, :album_id], \
-    #    [:albums_artists, :album_id, :artist_id], [:albums_artists, :artist_id, :album_id]], \
-    #    :class=>:Album
+    #   Artist.many_through_many :artist_albums, [[:albums_artists, :artist_id, :album_id],
+    #    [:albums_artists, :album_id, :artist_id], [:albums_artists, :artist_id, :album_id]],
+    #    class: :Album
     #
     #   # All tracks on albums by this artist (also could be a many_to_many)
-    #   Artist.many_through_many :tracks, [[:albums_artists, :artist_id, :album_id]], \
-    #    :right_primary_key=>:album_id
+    #   Artist.many_through_many :tracks, [[:albums_artists, :artist_id, :album_id]],
+    #    right_primary_key: :album_id
     #
     # Often you don't want the current object to appear in the array of associated objects.  This is easiest to handle via an :after_load hook:
     # 
     #   Artist.many_through_many :artists, [[:albums_artists, :artist_id, :album_id], [:albums_artists, :album_id, :artist_id]],
-    #     :after_load=>proc{|artist, associated_artists| associated_artists.delete(artist)}
+    #     after_load: lambda{|artist, associated_artists| associated_artists.delete(artist)}
     #
     # You can also handle it by adding a dataset block that excludes the current record (so it won't be retrieved at all), but
     # that won't work when eagerly loading, which is why the :after_load proc is recommended instead.
@@ -65,7 +65,7 @@ module Sequel
     # It's also common to not want duplicate records, in which case the :distinct option can be used:
     # 
     #   Artist.many_through_many :artists, [[:albums_artists, :artist_id, :album_id], [:albums, :id, :id], [:albums_artists, :album_id, :artist_id]],
-    #    :distinct=>true
+    #    distinct: true
     # 
     # In addition to many_through_many, this plugin also adds one_through_many, for an association to a single object through multiple join tables.
     # This is useful if there are unique constraints on the foreign keys in the join tables that reference back to the current table, or if you want
@@ -81,7 +81,7 @@ module Sequel
     module ManyThroughMany
       # The AssociationReflection subclass for many_through_many associations.
       class ManyThroughManyAssociationReflection < Sequel::Model::Associations::ManyToManyAssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:many_through_many] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:many_through_many] = self}
 
         # many_through_many and one_through_many associations can be clones
         def cloneable?(ref)
@@ -100,6 +100,17 @@ module Sequel
               cached_fetch(:#{meth}){calculate_edges[:#{meth}]}
             end
           END
+        end
+
+        FINALIZE_SETTINGS = superclass::FINALIZE_SETTINGS.merge(
+          :associated_key_table=>:associated_key_table,
+          :edges=>:edges,
+          :final_edge=>:final_edge,
+          :final_reverse_edge=>:final_reverse_edge,
+          :reverse_edges=>:reverse_edges
+        ).freeze
+        def finalize_settings
+          FINALIZE_SETTINGS
         end
 
         # The alias for the first join table.
@@ -181,7 +192,7 @@ module Sequel
       end
 
       class OneThroughManyAssociationReflection < ManyThroughManyAssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:one_through_many] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:one_through_many] = self}
         include Sequel::Model::Associations::SingularAssociationReflection
       end
 
@@ -217,7 +228,10 @@ module Sequel
         def def_many_through_many(opts)
           one_through_many = opts[:type] == :one_through_many
           opts[:read_only] = true
-          opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
+          if opts[:uniq]
+            opts[:after_load] ||= []
+            opts[:after_load].unshift(:array_uniq!)
+          end
           opts[:cartesian_product_number] ||= one_through_many ? 0 : 2
           opts[:through] = opts[:through].map do |e|
             case e
@@ -272,7 +286,7 @@ module Sequel
                 iq = nil
               end
               fe = opts.final_edge
-              ds.graph(opts.associated_class, use_only_conditions ? only_conditions : (Array(opts.right_primary_key).zip(Array(fe[:left])) + conditions), :select=>select, :table_alias=>eo[:table_alias], :qualify=>:deep, :join_type=>eo[:join_type]||join_type, :join_only=>eo[:join_only], &graph_block)
+              ds.graph(opts.associated_class.dataset, use_only_conditions ? only_conditions : (Array(opts.right_primary_key).zip(Array(fe[:left])) + conditions), :select=>select, :table_alias=>eo[:table_alias], :qualify=>:deep, :join_type=>eo[:join_type]||join_type, :join_only=>eo[:join_only], &graph_block)
             end
           end
         end

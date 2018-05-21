@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 require 'oci8'
-Sequel.require 'adapters/shared/oracle'
+require_relative 'shared/oracle'
 
 module Sequel
   module Oracle
@@ -11,14 +11,15 @@ module Sequel
 
       # ORA-00028: your session has been killed
       # ORA-01012: not logged on
+      # ORA-02396: exceeded maximum idle time, please connect again
       # ORA-03113: end-of-file on communication channel
       # ORA-03114: not connected to ORACLE
-      CONNECTION_ERROR_CODES = [ 28, 1012, 3113, 3114 ]      
+      CONNECTION_ERROR_CODES = [ 28, 1012, 2396, 3113, 3114 ].freeze
       
       ORACLE_TYPES = {
         :blob=>lambda{|b| Sequel::SQL::Blob.new(b.read)},
-        :clob=>lambda(&:read)
-      }
+        :clob=>:read.to_proc
+      }.freeze
 
       # Hash of conversion procs for this database.
       attr_reader :conversion_procs
@@ -40,8 +41,8 @@ module Sequel
         
         # The ruby-oci8 gem which retrieves oracle columns with a type of
         # DATE, TIMESTAMP, TIMESTAMP WITH TIME ZONE is complex based on the
-        # ruby version (1.9.2 or later) and Oracle version (9 or later)
-        # In the now standard case of 1.9.2 and Oracle 9 or later, the timezone
+        # ruby version and Oracle version (9 or later)
+        # In the now standard case of Oracle 9 or later, the timezone
         # is determined by the Oracle session timezone. Thus if the user
         # requests Sequel provide UTC timezone to the application,
         # we need to alter the session timezone to be UTC
@@ -71,6 +72,11 @@ module Sequel
         _execute(:insert, sql, opts)
       end
 
+      def freeze
+        @conversion_procs.freeze
+        super
+      end
+
       private
 
       def _execute(type, sql, opts=OPTS, &block)
@@ -86,11 +92,7 @@ module Sequel
               r = log_connection_yield(sql, conn){conn.exec(sql)}
             end
             if block_given?
-              begin
-                yield(r)
-              ensure
-                r.close
-              end
+              yield(r)
             elsif type == :insert
               last_insert_id(conn, opts)
             else
@@ -99,6 +101,8 @@ module Sequel
           rescue OCIException, RuntimeError => e
             # ruby-oci8 is naughty and raises strings in some places
             raise_error(e)
+          ensure
+            r.close if r.is_a?(::OCI8::Cursor)
           end
         end
       end
@@ -109,9 +113,9 @@ module Sequel
         @conversion_procs = ORACLE_TYPES.dup
       end
 
-      PS_TYPES = {'string'.freeze=>String, 'integer'.freeze=>Integer, 'float'.freeze=>Float,
-        'decimal'.freeze=>Float, 'date'.freeze=>Time, 'datetime'.freeze=>Time,
-        'time'.freeze=>Time, 'boolean'.freeze=>String, 'blob'.freeze=>OCI8::BLOB}
+      PS_TYPES = {'string'=>String, 'integer'=>Integer, 'float'=>Float,
+        'decimal'=>Float, 'date'=>Time, 'datetime'=>Time,
+        'time'=>Time, 'boolean'=>String, 'blob'=>OCI8::BLOB}.freeze
       def cursor_bind_params(conn, cursor, args)
         i = 0
         args.map do |arg, type|
@@ -126,11 +130,7 @@ module Sequel
           when ::Sequel::SQL::Blob
             arg = ::OCI8::BLOB.new(conn, arg)
           end
-          if t = PS_TYPES[type]
-            cursor.bind_param(i, arg, t)
-          else
-            cursor.bind_param(i, arg, arg.class)
-          end
+          cursor.bind_param(i, arg, PS_TYPES[type] || arg.class)
           arg
         end
       end
@@ -159,6 +159,10 @@ module Sequel
         else
           super
         end
+      end
+
+      def dataset_class_default
+        Dataset
       end
 
       def execute_prepared_statement(conn, type, name, opts)
@@ -213,12 +217,12 @@ module Sequel
       end
 
       def begin_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_BEGIN, conn){conn.autocommit = false}
+        log_connection_yield('Transaction.begin', conn){conn.autocommit = false}
         set_transaction_isolation(conn, opts)
       end
       
       def commit_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_COMMIT, conn){conn.commit}
+        log_connection_yield('Transaction.commit', conn){conn.commit}
       end
 
       def disconnect_error?(e, opts)
@@ -250,7 +254,7 @@ module Sequel
       end
       
       def rollback_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_ROLLBACK, conn){conn.rollback}
+        log_connection_yield('Transaction.rollback', conn){conn.rollback}
       end
 
       def schema_parse_table(table, opts=OPTS)
@@ -266,17 +270,21 @@ module Sequel
         im = input_identifier_meth(ds)
 
         # Primary Keys
-        ds = metadata_dataset.from(:all_constraints___cons, :all_cons_columns___cols).
-          where(:cols__table_name=>im.call(table), :cons__constraint_type=>'P',
-                :cons__constraint_name=>:cols__constraint_name, :cons__owner=>:cols__owner)
-        ds = ds.where(:cons__owner=>im.call(schema)) if schema
-        pks = ds.select_map(:cols__column_name)
+        ds = metadata_dataset.
+          from{[all_constraints.as(:cons), all_cons_columns.as(:cols)]}.
+          where{{
+           cols[:table_name]=>im.call(table),
+           cons[:constraint_type]=>'P',
+           cons[:constraint_name]=>cols[:constraint_name],
+           cons[:owner]=>cols[:owner]}}
+        ds = ds.where{{cons[:owner]=>im.call(schema)}} if schema
+        pks = ds.select_map{cols[:column_name]}
 
         # Default values
         defaults = begin
           metadata_dataset.from(:all_tab_cols).
             where(:table_name=>im.call(table)).
-            to_hash(:column_name, :data_default)
+            as_hash(:column_name, :data_default)
         rescue DatabaseError
           {}
         end
@@ -317,10 +325,6 @@ module Sequel
     class Dataset < Sequel::Dataset
       include DatasetMethods
 
-      Database::DatasetClass = self
-
-      PREPARED_ARG_PLACEHOLDER = ':'.freeze
-      
       # Oracle already supports named bind arguments, so use directly.
       module ArgumentMapper
         include Sequel::Dataset::ArgumentMapper
@@ -353,13 +357,6 @@ module Sequel
       BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
       PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
-      # Execute the given type of statement with the hash of values.
-      def call(type, bind_vars={}, *values, &block)
-        ps = to_prepared_statement(type, values)
-        ps.extend(BindArgumentMethods)
-        ps.call(bind_vars, &block)
-      end
-      
       def fetch_rows(sql)
         execute(sql) do |cursor|
           cps = db.conversion_procs
@@ -376,19 +373,6 @@ module Sequel
         self
       end
 
-      # Prepare the given type of query with the given name and store
-      # it in the database.  Note that a new native prepared statement is
-      # created on each call to this prepared statement.
-      def prepare(type, name=nil, *values)
-        ps = to_prepared_statement(type, values)
-        ps.extend(PreparedStatementMethods)
-        if name
-          ps.prepared_statement_name = name
-          db.set_prepared_statement(name, ps)
-        end
-        ps
-      end
-      
       # Oracle requires type specifiers for placeholders, at least
       # if you ever want to use a nil/NULL value as the value for
       # the placeholder.
@@ -411,7 +395,15 @@ module Sequel
       end
 
       def prepared_arg_placeholder
-        PREPARED_ARG_PLACEHOLDER
+        ':'
+      end
+
+      def bound_variable_modules
+        [BindArgumentMethods]
+      end
+
+      def prepared_statement_modules
+        [PreparedStatementMethods]
       end
     end
   end

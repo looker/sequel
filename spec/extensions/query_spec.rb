@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Database#query" do
   before do
@@ -31,7 +31,7 @@ describe "Dataset#query" do
   
   it "should support #select" do
     q = @d.query do
-      select :a, :b___mongo
+      select :a, Sequel[:b].as(:mongo)
       from :yyy
     end
     q.class.must_equal @d.class
@@ -87,14 +87,6 @@ describe "Dataset#query" do
     q.sql.must_equal "SELECT * FROM xyz"
   end
   
-  it "should have an appropriate mutation method" do
-    @d.query! do
-      select :a, :b___mongo
-      from :yyy
-    end
-    @d.sql.must_equal "SELECT a, b AS mongo FROM yyy"
-  end
-
   it "should raise on non-chainable method calls" do
     proc {@d.query {row_proc}}.must_raise(Sequel::Error)
     proc {@d.query {all}}.must_raise(Sequel::Error)

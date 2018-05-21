@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model, "TypecastOnLoad plugin" do
   before do
@@ -40,7 +40,7 @@ describe Sequel::Model, "TypecastOnLoad plugin" do
 
   it "should call setter method with value when automatically reloading the object on creation via insert_select" do
     @c.plugin :typecast_on_load, :b
-    @c.dataset.meta_def(:insert_select){|h| insert(h); first}
+    @c.dataset = @c.dataset.with_extend{def insert_select(h) insert(h); first end}
     o = @c.new(:b=>"1", :y=>"0")
     o.save.values.must_equal(:id=>1, :b=>1, :y=>"0")
     o.bset.must_equal true
@@ -76,5 +76,11 @@ describe Sequel::Model, "TypecastOnLoad plugin" do
   it "should not mark the object as modified" do
     @c.plugin :typecast_on_load, :b
     @c.load(:id=>1, :b=>"1", :y=>"0").modified?.must_equal false
+  end
+
+  it "should freeze typecast_on_load columns when freezing model class" do
+    @c.plugin :typecast_on_load, :b
+    @c.freeze
+    @c.typecast_on_load_columns.frozen?.must_equal true
   end
 end

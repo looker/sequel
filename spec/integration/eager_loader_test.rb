@@ -1,8 +1,8 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
+require_relative "spec_helper"
 
 describe "Eagerly loading a tree structure" do
   before(:all) do
-    DB.instance_variable_set(:@schemas, {})
+    DB.instance_variable_get(:@schemas).clear
     DB.create_table!(:nodes) do
       primary_key :id
       foreign_key :parent_id, :nodes
@@ -103,7 +103,7 @@ describe "Eagerly loading a tree structure" do
     nodes.length.must_equal 2
     nodes.collect{|x| x.pk}.must_equal [3, 7]
     nodes.first.parent.pk.must_equal 1
-    nodes.first.parent.parent.must_equal nil
+    nodes.first.parent.parent.must_be_nil
     node = nodes.last
     node.parent.pk.must_equal 6
     node = node.parent
@@ -114,7 +114,7 @@ describe "Eagerly loading a tree structure" do
     node.parent.pk.must_equal 2
     node = node.parent
     node.parent.pk.must_equal 1
-    node.parent.parent.must_equal nil
+    node.parent.parent.must_be_nil
   end
 end
 
@@ -128,7 +128,7 @@ describe "Association Extensions" do
         first(:name=>name) || model.create(:name=>name, :author_id=>model_object.pk)
       end
     end
-    DB.instance_variable_set(:@schemas, {})
+    DB.instance_variable_get(:@schemas).clear
     DB.create_table!(:authors) do
       primary_key :id
     end
@@ -171,14 +171,14 @@ end
 
 describe "has_many :through has_many and has_one :through belongs_to" do
   before(:all) do
-    DB.instance_variable_set(:@schemas, {})
+    DB.instance_variable_get(:@schemas).clear
     DB.create_table!(:firms) do
       primary_key :id
     end
     class ::Firm < Sequel::Model
       one_to_many :clients
       one_to_many :invoices, :read_only=>true, \
-        :dataset=>proc{Invoice.eager_graph(:client).filter(:client__firm_id=>pk)}, \
+        :dataset=>proc{Invoice.eager_graph(:client).filter(Sequel[:client][:firm_id]=>pk)}, \
         :after_load=>(proc do |firm, invs|
           invs.each do |inv|
             inv.client.associations[:firm] = inv.associations[:firm] = firm
@@ -187,7 +187,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
         :eager_loader=>(proc do |eo|
           id_map = eo[:id_map]
           eo[:rows].each{|firm| firm.associations[:invoices] = []}
-          Invoice.eager_graph(:client).filter(:client__firm_id=>id_map.keys).all do |inv|
+          Invoice.eager_graph(:client).filter(Sequel[:client][:firm_id]=>id_map.keys).all do |inv|
             id_map[inv.client.firm_id].each do |firm|
               firm.associations[:invoices] << inv
             end
@@ -211,7 +211,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
     class ::Invoice < Sequel::Model
       many_to_one :client
       many_to_one :firm, :key=>nil, :read_only=>true, \
-        :dataset=>proc{Firm.eager_graph(:clients).filter(:clients__id=>client_id)}, \
+        :dataset=>proc{Firm.eager_graph(:clients).filter(Sequel[:clients][:id]=>client_id)}, \
         :after_load=>(proc do |inv, firm|
           # Delete the cached associations from firm, because it only has the
           # client with this invoice, instead of all clients of the firm
@@ -226,7 +226,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
             inv.associations[:firm] = nil
             (id_map[inv.client_id] ||= []) << inv
           end
-          Firm.eager_graph(:clients).filter(:clients__id=>id_map.keys).all do |firm|
+          Firm.eager_graph(:clients).filter(Sequel[:clients][:id]=>id_map.keys).all do |firm|
             # Delete the cached associations from firm, because it only has the
             # clients related the invoices being eagerly loaded, instead of all
             # clients of the firm.
@@ -291,7 +291,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
     firm.must_equal @firm1
     @invoice1.client.must_equal @client1
     @invoice1.client.firm.must_equal @firm1
-    firm.associations[:clients].must_equal nil
+    firm.associations[:clients].must_be_nil
   end
 
   it "should eagerly load has_one :through belongs_to records for multiple objects" do
@@ -300,29 +300,29 @@ describe "has_many :through has_many and has_one :through belongs_to" do
     invs[0].firm.must_equal @firm1
     invs[0].client.must_equal @client1
     invs[0].client.firm.must_equal @firm1
-    invs[0].firm.associations[:clients].must_equal nil
+    invs[0].firm.associations[:clients].must_be_nil
     invs[1].firm.must_equal @firm1
     invs[1].client.must_equal @client1
     invs[1].client.firm.must_equal @firm1
-    invs[1].firm.associations[:clients].must_equal nil
+    invs[1].firm.associations[:clients].must_be_nil
     invs[2].firm.must_equal @firm1
     invs[2].client.must_equal @client2
     invs[2].client.firm.must_equal @firm1
-    invs[2].firm.associations[:clients].must_equal nil
+    invs[2].firm.associations[:clients].must_be_nil
     invs[3].firm.must_equal @firm2
     invs[3].client.must_equal @client3
     invs[3].client.firm.must_equal @firm2
-    invs[3].firm.associations[:clients].must_equal nil
+    invs[3].firm.associations[:clients].must_be_nil
     invs[4].firm.must_equal @firm2
     invs[4].client.must_equal @client3
     invs[4].client.firm.must_equal @firm2
-    invs[4].firm.associations[:clients].must_equal nil
+    invs[4].firm.associations[:clients].must_be_nil
   end
 end
 
 describe "Polymorphic Associations" do
   before(:all) do
-    DB.instance_variable_set(:@schemas, {})
+    DB.instance_variable_get(:@schemas).clear
     DB.create_table!(:assets) do
       primary_key :id
       Integer :attachable_id
@@ -415,9 +415,9 @@ describe "Polymorphic Associations" do
     @asset2.attachable_id.must_equal @post.pk
     @asset2.attachable_type.must_equal 'Post'
     @asset1.attachable = nil
-    @asset1.attachable.must_equal nil
-    @asset1.attachable_id.must_equal nil
-    @asset1.attachable_type.must_equal nil
+    @asset1.attachable.must_be_nil
+    @asset1.attachable_id.must_be_nil
+    @asset1.attachable_type.must_be_nil
   end
 
   it "should add items correctly" do
@@ -433,22 +433,22 @@ describe "Polymorphic Associations" do
     @note.assets.must_equal [@asset2]
     @note.remove_asset(@asset2)
     @note.assets.must_equal []
-    @asset2.attachable.must_equal nil
-    @asset2.attachable_id.must_equal nil
-    @asset2.attachable_type.must_equal nil
+    @asset2.attachable.must_be_nil
+    @asset2.attachable_id.must_be_nil
+    @asset2.attachable_type.must_be_nil
   end
 
   it "should remove all items correctly" do
     @post.remove_all_assets
     @note.remove_all_assets
-    @asset1.reload.attachable.must_equal nil
-    @asset2.reload.attachable.must_equal nil
+    @asset1.reload.attachable.must_be_nil
+    @asset2.reload.attachable.must_be_nil
   end
 end
 
 describe "many_to_one/one_to_many not referencing primary key" do
   before(:all) do
-    DB.instance_variable_set(:@schemas, {})
+    DB.instance_variable_get(:@schemas).clear
     DB.create_table!(:clients) do
       primary_key :id
       String :name
@@ -543,7 +543,7 @@ describe "many_to_one/one_to_many not referencing primary key" do
     @invoice1.client.must_equal @client2
     @invoice1.client_name.must_equal 'Y'
     @invoice1.client = nil
-    @invoice1.client_name.must_equal nil
+    @invoice1.client_name.must_be_nil
   end
 
   it "should add the associated object correctly" do
@@ -552,7 +552,7 @@ describe "many_to_one/one_to_many not referencing primary key" do
     @client2.invoices.must_equal [@invoice1]
     @invoice1.client_name.must_equal 'Y'
     @invoice1.client = nil
-    @invoice1.client_name.must_equal nil
+    @invoice1.client_name.must_be_nil
   end
 
   it "should remove the associated object correctly" do
@@ -560,16 +560,16 @@ describe "many_to_one/one_to_many not referencing primary key" do
     invs.must_equal [@invoice1, @invoice2]
     @client1.remove_invoice(@invoice1)
     @client1.invoices.must_equal [@invoice2]
-    @invoice1.client_name.must_equal nil
-    @invoice1.client.must_equal nil
+    @invoice1.client_name.must_be_nil
+    @invoice1.client.must_be_nil
   end
 
   it "should remove all associated objects correctly" do
     @client1.remove_all_invoices
-    @invoice1.refresh.client.must_equal nil
-    @invoice1.client_name.must_equal nil
-    @invoice2.refresh.client.must_equal nil
-    @invoice2.client_name.must_equal nil
+    @invoice1.refresh.client.must_be_nil
+    @invoice1.client_name.must_be_nil
+    @invoice2.refresh.client.must_be_nil
+    @invoice2.client_name.must_be_nil
   end
 end
 
@@ -666,19 +666,19 @@ describe "one to one associations" do
   end
 
   it "should be eager loadable" do
-    bk1, bk2 = Book.filter(:books__id=>[1,2]).eager(:first_page).all
+    bk1, bk2 = Book.filter(Sequel[:books][:id]=>[1,2]).eager(:first_page).all
     bk1.first_page.must_equal @page1
     bk2.first_page.must_equal @page3
   end
 
   it "should be eager graphable" do
-    bk1, bk2 = Book.filter(:books__id=>[1,2]).eager_graph(:first_page).all
+    bk1, bk2 = Book.filter(Sequel[:books][:id]=>[1,2]).eager_graph(:first_page).all
     bk1.first_page.must_equal @page1
     bk2.first_page.must_equal @page3
   end
 
   it "should be eager graphable two at once" do
-    bk1, bk2 = Book.filter(:books__id=>[1,2]).eager_graph(:first_page, :second_page).all
+    bk1, bk2 = Book.filter(Sequel[:books][:id]=>[1,2]).eager_graph(:first_page, :second_page).all
     bk1.first_page.must_equal @page1
     bk1.second_page.must_equal @page2
     bk2.first_page.must_equal @page3

@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 with_server_specs = shared_description do
   it "should set the default server to use in the block" do
@@ -6,6 +6,13 @@ with_server_specs = shared_description do
     @db.sqls.must_equal ["SELECT * FROM t -- a"]
     @db.with_server(:b){@db[:t].all}
     @db.sqls.must_equal ["SELECT * FROM t -- b"]
+  end
+
+  it "should set the default server to use in the block" do
+    @db.with_server(:a, :b){@db[:t].all}
+    @db.sqls.must_equal ["SELECT * FROM t -- b"]
+    @db.with_server(:a, :b){@db[:t].insert}
+    @db.sqls.must_equal ["INSERT INTO t DEFAULT VALUES -- a"]
   end
 
   it "should have no affect after the block" do

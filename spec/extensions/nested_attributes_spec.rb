@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "NestedAttributes plugin" do
   def check_sqls(should, is)
@@ -47,6 +47,12 @@ describe "NestedAttributes plugin" do
     @Artist.nested_attributes :first_concert
     @Concert.nested_attributes :albums
     @db.sqls
+  end
+  
+  it "should not modify options hash when loading plugin" do
+    h = {}
+    @Concert.nested_attributes :albums, h
+    h.must_equal({})
   end
   
   it "should support creating new many_to_one objects" do
@@ -326,7 +332,7 @@ describe "NestedAttributes plugin" do
     ar.set(:albums_attributes=>[{:id=>10, :_remove=>'t'}])
     ar.associations[:albums].must_equal []
     @db.sqls.must_equal []
-    @Album.dataset._fetch = {:id=>1}
+    @Album.dataset = @Album.dataset.with_fetch(:id=>1)
     ar.save
     check_sql_array("SELECT 1 AS one FROM albums WHERE ((albums.artist_id = 20) AND (id = 10)) LIMIT 1",
       ["UPDATE albums SET artist_id = NULL, name = 'Al' WHERE (id = 10)", "UPDATE albums SET name = 'Al', artist_id = NULL WHERE (id = 10)"],
@@ -350,7 +356,7 @@ describe "NestedAttributes plugin" do
     ar.associations[:concerts] = [co]
     ar.set(:concerts_attributes=>[{:tour=>'To', :date=>'2004-04-05', :_remove=>'t'}])
     @db.sqls.must_equal []
-    @Concert.dataset._fetch = {:id=>1}
+    @Concert.dataset = @Concert.dataset.with_fetch(:id=>1)
     ar.save
     check_sql_array(["SELECT 1 AS one FROM concerts WHERE ((concerts.artist_id = 10) AND (tour = 'To') AND (date = '2004-04-05')) LIMIT 1", "SELECT 1 AS one FROM concerts WHERE ((concerts.artist_id = 10) AND (date = '2004-04-05') AND (tour = 'To')) LIMIT 1"],
       ["UPDATE concerts SET artist_id = NULL, playlist = 'Pl' WHERE ((tour = 'To') AND (date = '2004-04-05'))", "UPDATE concerts SET playlist = 'Pl', artist_id = NULL WHERE ((tour = 'To') AND (date = '2004-04-05'))", "UPDATE concerts SET artist_id = NULL, playlist = 'Pl' WHERE ((date = '2004-04-05') AND (tour = 'To'))", "UPDATE concerts SET playlist = 'Pl', artist_id = NULL WHERE ((date = '2004-04-05') AND (tour = 'To'))"],
@@ -456,17 +462,6 @@ describe "NestedAttributes plugin" do
     ar.set(:albums_attributes=>[{:id=>10, :_delete=>'t'}])
   end
   
-  it "should not raise an Error if an unmatched primary key is given, if the :strict=>false option is used" do
-    @Artist.nested_attributes :albums, :strict=>false
-    al = @Album.load(:id=>10, :name=>'Al')
-    ar = @Artist.load(:id=>20, :name=>'Ar')
-    ar.associations[:albums] = [al]
-    ar.set(:albums_attributes=>[{:id=>30, :_delete=>'t'}])
-    @db.sqls.must_equal []
-    ar.save
-    @db.sqls.must_equal ["UPDATE artists SET name = 'Ar' WHERE (id = 20)"]
-  end
-  
   it "should not raise an Error if an unmatched primary key is given, if the :unmatched_pk=>:ignore option is used" do
     @Artist.nested_attributes :albums, :unmatched_pk=>:ignore
     al = @Album.load(:id=>10, :name=>'Al')
@@ -486,8 +481,8 @@ describe "NestedAttributes plugin" do
     ar.set(:concerts_attributes=>[{:tour=>'To', :date=>'2004-04-05', :_delete=>'t'}])
   end
 
-  it "should not raise an Error if an unmatched composite primary key is given, if the :strict=>false option is used" do
-    @Artist.nested_attributes :concerts, :strict=>false
+  it "should not raise an Error if an unmatched composite primary key is given, if the :unmatched_pk=>:ignore option is used" do
+    @Artist.nested_attributes :concerts, :unmatched_pk=>:ignore
     ar = @Artist.load(:id=>10, :name=>'Ar')
     co = @Concert.load(:tour=>'To', :date=>'2004-04-05', :playlist=>'Pl')
     ar.associations[:concerts] = [co]
@@ -598,7 +593,7 @@ describe "NestedAttributes plugin" do
   end
 
   it "should return objects created/modified in the internal methods" do
-    @Album.nested_attributes :tags, :remove=>true, :strict=>false
+    @Album.nested_attributes :tags, :remove=>true, :unmatched_pk=>:ignore
     objs = []
     @Album.class_eval do
       define_method(:nested_attributes_create){|*a| objs << [super(*a), :create]}
@@ -646,8 +641,12 @@ describe "NestedAttributes plugin" do
       "UPDATE tags SET name = 'T2' WHERE (id = 30)",
       "INSERT INTO tags (name) VALUES ('T3')",
       ["INSERT INTO at (album_id, tag_id) VALUES (10, 1)", "INSERT INTO at (tag_id, album_id) VALUES (1, 10)"])
-    proc{al.set(:tags_attributes=>[{:id=>30, :name=>'T2', :number=>3}])}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{al.set(:tags_attributes=>[{:name=>'T2', :number=>3}])}.must_raise(Sequel::MassAssignmentRestriction)
+    al.set(:tags_attributes=>[{:id=>30, :name=>'T3', :number=>3}])
+    al.tags.first.name.must_equal 'T3'
+    al.tags.first.number.must_equal 10
+    al.set(:tags_attributes=>[{:name=>'T4', :number=>3}])
+    al.tags.last.name.must_equal 'T4'
+    al.tags.last.number.must_be_nil
   end
 
   it "should accept a proc for the :fields option that accepts the associated object and returns an array of fields" do
@@ -664,8 +663,12 @@ describe "NestedAttributes plugin" do
       "UPDATE tags SET name = 'T2' WHERE (id = 30)",
       "INSERT INTO tags (name) VALUES ('T3')",
       ["INSERT INTO at (album_id, tag_id) VALUES (10, 1)", "INSERT INTO at (tag_id, album_id) VALUES (1, 10)"])
-    proc{al.set(:tags_attributes=>[{:id=>30, :name=>'T2', :number=>3}])}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{al.set(:tags_attributes=>[{:name=>'T2', :number=>3}])}.must_raise(Sequel::MassAssignmentRestriction)
+    al.set_nested_attributes(:tags, [{:id=>30, :name=>'T3', :number=>3}], :fields=>[:name])
+    al.tags.first.name.must_equal 'T3'
+    al.tags.first.number.must_equal 10
+    al.set_nested_attributes(:tags, [{:name=>'T4', :number=>3}], :fields=>[:name])
+    al.tags.last.name.must_equal 'T4'
+    al.tags.last.number.must_be_nil
   end
 
   it "should allow per-call options via the set_nested_attributes method" do
@@ -682,8 +685,12 @@ describe "NestedAttributes plugin" do
       "UPDATE tags SET name = 'T2' WHERE (id = 30)",
       "INSERT INTO tags (name) VALUES ('T3')",
       ["INSERT INTO at (album_id, tag_id) VALUES (10, 1)", "INSERT INTO at (tag_id, album_id) VALUES (1, 10)"])
-    proc{al.set_nested_attributes(:tags, [{:id=>30, :name=>'T2', :number=>3}], :fields=>[:name])}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{al.set_nested_attributes(:tags, [{:name=>'T2', :number=>3}], :fields=>[:name])}.must_raise(Sequel::MassAssignmentRestriction)
+    al.set_nested_attributes(:tags, [{:id=>30, :name=>'T3', :number=>3}], :fields=>[:name])
+    al.tags.first.name.must_equal 'T3'
+    al.tags.first.number.must_equal 10
+    al.set_nested_attributes(:tags, [{:name=>'T4', :number=>3}], :fields=>[:name])
+    al.tags.last.name.must_equal 'T4'
+    al.tags.last.number.must_be_nil
   end
 
   it "should have set_nested_attributes method raise error if called with a bad association" do
@@ -693,5 +700,10 @@ describe "NestedAttributes plugin" do
   it "should have set_nested_attributes method raise error if called with an association that doesn't support nested attributes" do
     @Tag.columns :id, :name, :number
     proc{@Album.load(:id=>10, :name=>'Al').set_nested_attributes(:tags, [{:id=>30, :name=>'T2', :number=>3}], :fields=>[:name])}.must_raise(Sequel::Error)
+  end
+
+  it "should not allow modifying ensted attributes after freezing" do
+    @Artist.freeze
+    proc{@Artist.nested_attributes :albums}.must_raise RuntimeError, TypeError
   end
 end

@@ -1,9 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 begin
   require 'tzinfo'
-rescue LoadError => e
-  skip_warn "named_timezones_spec: can't load tzinfo (#{e.class}: #{e})"
+rescue LoadError
+  warn "Skipping test of named_timezones extension: can't load tzinfo"
 else
 Sequel.extension :thread_local_timezones
 Sequel.extension :named_timezones
@@ -44,9 +44,10 @@ describe "Sequel named_timezones extension" do
   end
     
   it "should convert datetimes going into the database to named database_timezone" do
-    ds = @db[:a]
-    def ds.supports_timestamp_timezones?; true; end
-    def ds.supports_timestamp_usecs?; false; end
+    ds = @db[:a].with_extend do
+      def supports_timestamp_timezones?; true; end
+      def supports_timestamp_usecs?; false; end
+    end
     ds.insert([@dt, DateTime.civil(2009,6,1,3,20,30,-7/24.0), DateTime.civil(2009,6,1,6,20,30,-1/6.0)])
     @db.sqls.must_equal ["INSERT INTO a VALUES ('2009-06-01 06:20:30-0400', '2009-06-01 06:20:30-0400', '2009-06-01 06:20:30-0400')"]
   end

@@ -1,22 +1,20 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "pg_array extension" do
   before(:all) do
     Sequel.extension :pg_array
-    @pg_types = Sequel::Postgres::PG_TYPES.dup
-    @pg_named_types = Sequel::Postgres::PG_NAMED_TYPES.dup
-  end
-  after(:all) do
-    Sequel::Postgres::PG_TYPES.replace(@pg_types)
-    Sequel::Postgres::PG_NAMED_TYPES.replace(@pg_named_types)
   end
 
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
-    @db.extend_datasets(Module.new{def supports_timestamp_timezones?; false; end; def supports_timestamp_usecs?; false; end})
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets(Module.new do
+      def supports_timestamp_timezones?; false end
+      def supports_timestamp_usecs?; false; end
+      def quote_identifiers?; false end
+    end)
     @db.extension(:pg_array)
     @m = Sequel::Postgres
-    @converter = @m::PG_TYPES
+    @converter = @db.conversion_procs
     @db.sqls
   end
 
@@ -30,6 +28,11 @@ describe "pg_array extension" do
     c.call("{a}").to_a.must_equal ['a']
     c.call('{"a b"}').to_a.must_equal ['a b']
     c.call('{a,b}').to_a.must_equal ['a', 'b']
+  end
+
+  it "should preserve encoding when parsing text arrays" do
+    c = @converter[1009]
+    c.call("{a,\u00E4}".encode('ISO-8859-1')).map(&:encoding).must_equal [Encoding::ISO_8859_1, Encoding::ISO_8859_1]
   end
 
   it "should parse multi-dimensional text arrays" do
@@ -206,6 +209,17 @@ describe "pg_array extension" do
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:integer, :integer_array, :real_array, :decimal_array, :string_array]
   end
 
+  it "should set :callable_default schema entries if default value is recognized" do
+    @db.fetch = [{:name=>'id', :db_type=>'integer', :default=>'1'}, {:name=>'t', :db_type=>'text[]', :default=>"'{}'::text[]"}]
+    s = @db.schema(:items)
+    s[0][1][:callable_default].must_be_nil
+    v = s[1][1][:callable_default].call
+    Sequel::Postgres::PGArray.===(v).must_equal true
+    @db.literal(v).must_equal "'{}'::text[]"
+    v << 'a'
+    @db.literal(v).must_equal "ARRAY['a']::text[]"
+  end
+
   it "should support typecasting of the various array types" do
     {
       :integer=>{:class=>Integer, :convert=>['1', 1, '1']},
@@ -255,75 +269,65 @@ describe "pg_array extension" do
   end
 
   it "should support registering custom array types" do
-    Sequel::Postgres::PGArray.register('foo')
+    @db.register_array_type('foo')
     @db.typecast_value(:foo_array, []).class.must_equal(Sequel::Postgres::PGArray)
     @db.fetch = [{:name=>'id', :db_type=>'foo[]'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:foo_array]
   end
 
   it "should support registering custom types with :type_symbol option" do
-    Sequel::Postgres::PGArray.register('foo', :type_symbol=>:bar)
+    @db.register_array_type('foo', :type_symbol=>:bar)
     @db.typecast_value(:bar_array, []).class.must_equal(Sequel::Postgres::PGArray)
     @db.fetch = [{:name=>'id', :db_type=>'foo[]'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:bar_array]
   end
 
   it "should support using a block as a custom conversion proc given as block" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>1234){|s| (s*2).to_i}
-    @converter[1234].call('{1}').must_equal [11]
+    @db.register_array_type('foo', :oid=>1234){|s| (s*2).to_i}
+    @db.conversion_procs[1234].call('{1}').must_equal [11]
   end
 
   it "should support using a block as a custom conversion proc given as :converter option" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>1234, :converter=>proc{|s| (s*2).to_i})
-    @converter[1234].call('{1}').must_equal [11]
+    @db.register_array_type('foo', :oid=>1234, :converter=>proc{|s| (s*2).to_i})
+    @db.conversion_procs[1234].call('{1}').must_equal [11]
   end
 
   it "should support using an existing scaler conversion proc via the :scalar_oid option" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>1234, :scalar_oid=>16)
-    @converter[1234].call('{t}').must_equal [true]
-  end
-
-  it "should support using a given conversion procs hash via the :type_procs option" do
-    h = {16=>proc{|s| "!#{s}"}}
-    Sequel::Postgres::PGArray.register('foo', :oid=>1234, :scalar_oid=>16, :type_procs=>h)
-    h[1234].call('{t}').must_equal ["!t"]
-  end
-
-  it "should support adding methods to the given module via the :typecast_methods_module option" do
-    m = Module.new
-    Sequel::Postgres::PGArray.register('foo15', :scalar_typecast=>:boolean, :typecast_methods_module=>m)
-    @db.typecast_value(:foo15_array, ['t']).must_equal ['t']
-    @db.extend(m)
-    @db.typecast_value(:foo15_array, ['t']).must_equal [true]
+    @db.register_array_type('foo', :oid=>1234, :scalar_oid=>16)
+    @db.conversion_procs[1234].call('{t}').must_equal [true]
   end
 
   it "should not raise an error if using :scalar_oid option with unexisting scalar conversion proc" do
-    h = {}
-    Sequel::Postgres::PGArray.register('foo', :oid=>1234, :scalar_oid=>0, :type_procs=>h)
-    h[1234].call('{t}').must_equal ["t"]
+    @db.register_array_type('foo', :oid=>1234, :scalar_oid=>0)
+    @db.conversion_procs[1234].call('{t}').must_equal ["t"]
   end
 
   it "should raise an error if using :converter option and a block argument" do
-    proc{Sequel::Postgres::PGArray.register('foo', :converter=>proc{}){}}.must_raise(Sequel::Error)
+    proc{@db.register_array_type('foo', :converter=>proc{}){}}.must_raise(Sequel::Error)
   end
 
   it "should raise an error if using :scalar_oid option and a block argument" do
-    proc{Sequel::Postgres::PGArray.register('foo', :scalar_oid=>16){}}.must_raise(Sequel::Error)
+    proc{@db.register_array_type('foo', :scalar_oid=>16){}}.must_raise(Sequel::Error)
   end
 
   it "should support registering custom types with :oid option" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>1)
-    Sequel::Postgres::PG_TYPES[1].call('{1}').class.must_equal(Sequel::Postgres::PGArray)
+    @db.register_array_type('foo', :oid=>1)
+    @db.conversion_procs[1].call('{1}').class.must_equal(Sequel::Postgres::PGArray)
   end
 
   it "should support registering converters with blocks" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>4){|s| s.to_i * 2}
-    Sequel::Postgres::PG_TYPES[4].call('{{1,2},{3,4}}').must_equal [[2, 4], [6, 8]]
+    @db.register_array_type('foo', :oid=>4){|s| s.to_i * 2}
+    @db.conversion_procs[4].call('{{1,2},{3,4}}').must_equal [[2, 4], [6, 8]]
   end
 
   it "should support registering custom types with :array_type option" do
-    Sequel::Postgres::PGArray.register('foo', :oid=>3, :array_type=>:blah)
-    @db.literal(Sequel::Postgres::PG_TYPES[3].call('{}')).must_equal "'{}'::blah[]"
+    @db.register_array_type('foo', :oid=>3, :array_type=>:blah)
+    @db.literal(@db.conversion_procs[3].call('{}')).must_equal "'{}'::blah[]"
+  end
+
+  it "should not support registering custom array types on a per-Database basis for frozen databases" do
+    @db.freeze
+    proc{@db.register_array_type('banana', :oid=>7865){|s| s}}.must_raise RuntimeError, TypeError
   end
 
   it "should support registering custom array types on a per-Database basis" do
@@ -366,10 +370,14 @@ describe "pg_array extension" do
     @db.typecast_value(:banana_array, %w'1 2').must_equal [1,2]
   end
 
-  it "should set appropriate timestamp conversion procs when resetting conversion procs" do
-    Sequel::Postgres::PG_NAMED_TYPES[:foo] = proc{|v| v*2}
-    @db.fetch = [[{:oid=>2222, :typname=>'foo'}], [{:oid=>2222, :typarray=>2223, :typname=>'foo'}]]
-    @db.reset_conversion_procs
+  it "should set appropriate timestamp conversion procs" do
+    @db.conversion_procs[1185].call('{"2011-10-20 11:12:13"}').must_equal [Time.local(2011, 10, 20, 11, 12, 13)]
+    @db.conversion_procs[1115].call('{"2011-10-20 11:12:13"}').must_equal [Time.local(2011, 10, 20, 11, 12, 13)]
+  end
+
+  it "should set appropriate timestamp conversion procs when adding conversion procs" do
+    @db.fetch = [[{:oid=>2222}], [{:oid=>2222, :typarray=>2223}]]
+    @db.add_named_conversion_proc(:foo){|v| v*2}
     procs = @db.conversion_procs
     procs[1185].call('{"2011-10-20 11:12:13"}').must_equal [Time.local(2011, 10, 20, 11, 12, 13)]
     procs[1115].call('{"2011-10-20 11:12:13"}').must_equal [Time.local(2011, 10, 20, 11, 12, 13)]

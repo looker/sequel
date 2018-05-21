@@ -1,18 +1,18 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 require 'yaml'
 
 describe "Sequel::Plugins::LazyAttributes" do
   before do
     @db = Sequel.mock
     def @db.supports_schema_parsing?() true end
-    @db.meta_def(:schema){|*a| [[:id, {:type=>:integer}], [:name,{:type=>:string}]]}
+    def @db.schema(*a) [[:id, {:type=>:integer}], [:name,{:type=>:string}]] end
     class ::LazyAttributesModel < Sequel::Model(@db[:la])
       plugin :lazy_attributes
       set_columns([:id, :name])
-      meta_def(:columns){[:id, :name]}
+      def self.columns; [:id, :name] end
       lazy_attributes :name
-      meta_def(:columns){[:id]}
-      instance_dataset._fetch = dataset._fetch = proc do |sql|
+      def self.columns; [:id] end
+      set_dataset dataset.with_fetch(proc do |sql|
         if sql !~ /WHERE/
           if sql =~ /name/
             [{:id=>1, :name=>'1'}, {:id=>2, :name=>'2'}]
@@ -32,7 +32,7 @@ describe "Sequel::Plugins::LazyAttributes" do
             end
           end
         end
-      end
+      end)
     end
     @c = ::LazyAttributesModel
     @ds = LazyAttributesModel.dataset
@@ -57,6 +57,13 @@ describe "Sequel::Plugins::LazyAttributes" do
   end
 
   it "should handle lazy attributes that are qualified in the selection" do
+    @c.set_dataset(@ds.select(Sequel[:la][:id], Sequel[:la][:blah]))
+    @c.dataset.sql.must_equal 'SELECT la.id, la.blah FROM la'
+    @c.plugin :lazy_attributes, :blah
+    @c.dataset.sql.must_equal 'SELECT la.id FROM la'
+  end
+  
+  with_symbol_splitting "should handle lazy attributes that are qualified in the selection using symbol splitting" do
     @c.set_dataset(@ds.select(:la__id, :la__blah))
     @c.dataset.sql.must_equal 'SELECT la.id, la.blah FROM la'
     @c.plugin :lazy_attributes, :blah
@@ -108,7 +115,7 @@ describe "Sequel::Plugins::LazyAttributes" do
   it "should not lazily load the attribute for a single model object if it is a new record" do
     m = @c.new
     m.values.must_equal({})
-    m.name.must_equal nil
+    m.name.must_be_nil
     @db.sqls.must_equal []
   end
 
@@ -148,7 +155,7 @@ describe "Sequel::Plugins::LazyAttributes" do
 
   it "should work with the serialization plugin" do
     @c.plugin :serialization, :yaml, :name
-    @c.instance_dataset._fetch = @ds._fetch = [[{:id=>1}, {:id=>2}], [{:id=>1, :name=>"--- 3\n"}, {:id=>2, :name=>"--- 6\n"}], [{:id=>1}], [{:name=>"--- 3\n"}]]
+    @ds = @c.dataset = @ds.with_fetch([[{:id=>1}, {:id=>2}], [{:id=>1, :name=>"--- 3\n"}, {:id=>2, :name=>"--- 6\n"}], [{:id=>1}], [{:name=>"--- 3\n"}]])
     ms = @ds.all
     ms.map{|m| m.values}.must_equal [{:id=>1}, {:id=>2}]
     ms.map{|m| m.name}.must_equal [3,6]
@@ -166,5 +173,11 @@ describe "Sequel::Plugins::LazyAttributes" do
     m.deserialized_values.must_equal(:name=>3)
     m.name.must_equal 3
     @db.sqls.must_equal ["SELECT la.id FROM la LIMIT 1", "SELECT la.name FROM la WHERE (id = 1) LIMIT 1"]
+  end
+
+  it "should not allow additional lazy attributes after freezing" do
+    @c.plugin :lazy_attributes, :blah
+    @c.freeze
+    proc{@c.lazy_attributes :name}.must_raise RuntimeError, TypeError
   end
 end

@@ -2,31 +2,39 @@
 
 source 'http://rubygems.org'
 
-gem 'rake', '<10.0.0'
 gem 'minitest', '>= 5.7.0'
 gem 'minitest-hooks'
 gem 'minitest-shared_description'
 
 # Plugin/Extension Dependencies
 gem 'tzinfo'
-gem 'activemodel', '<4.0.0'
-gem 'nokogiri', '<1.6.0'
-gem 'json'
 
-if RUBY_VERSION < '1.9.3'
-  gem "i18n", '<0.7.0'
+if RUBY_VERSION < '2.1.0'
+  gem 'nokogiri', '<1.7.0'
+else
+  gem 'nokogiri'
 end
 
-if RUBY_VERSION < '1.9.0'
-  gem "fastercsv"
+if RUBY_VERSION < '2.2.0'
+  gem 'activemodel', '<5.0.0'
+else
+  gem 'activemodel'
 end
 
-# MRI/Rubinius Adapter Dependencies
+if RUBY_VERSION < '2.0.0'
+  gem 'json', '<1.8.5'
+  gem 'rake', '<10.0.0'
+else
+  gem 'json'
+  gem 'rake'
+end
+
+# MRI Adapter Dependencies
 platforms :ruby do
   gem "sqlite3"
   gem "mysql2"
-  if RUBY_VERSION < '1.9.3'
-    gem "pg", '<0.18.0'
+  if RUBY_VERSION < '2.0.0'
+    gem "pg", '<0.19.0'
   else
     gem "pg"
   end
@@ -36,5 +44,5 @@ end
 platforms :jruby do
   gem 'jdbc-sqlite3'
   gem 'jdbc-mysql'
-  gem 'jdbc-postgres', '9.4.1200'
+  gem 'jdbc-postgres'
 end

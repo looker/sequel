@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::AutoValidations" do
   before do
@@ -98,6 +98,8 @@ describe "Sequel::Plugins::AutoValidations" do
     @m = @c.new
     @c.skip_auto_validations(:not_null)
     @m.valid?.must_equal true
+    @m.nnd = nil
+    @m.valid?.must_equal true
 
     @m.set(:d=>'/', :num=>'a', :name=>'1')
     @m.valid?.must_equal false
@@ -188,5 +190,13 @@ describe "Sequel::Plugins::AutoValidations" do
     @m.set(:name=>1, :num=>1, :d=>Date.today)
     @m.valid?.must_equal false
     @m.errors.must_equal([:name, :num]=>["u_message"])
+  end
+
+  it "should not allow modifying auto validation information for frozen model classes" do
+    @c.freeze
+    @c.auto_validate_not_null_columns.frozen?.must_equal true
+    @c.auto_validate_explicit_not_null_columns.frozen?.must_equal true
+    @c.auto_validate_max_length_columns.frozen?.must_equal true
+    @c.auto_validate_unique_columns.frozen?.must_equal true
   end
 end

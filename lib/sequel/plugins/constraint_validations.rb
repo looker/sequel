@@ -19,7 +19,7 @@ module Sequel
     #
     # Then when you went to save an album that uses this plugin:
     #
-    #   Album.create(:name=>'abc')
+    #   Album.create(name: 'abc')
     #   # raises Sequel::ValidationFailed: name is shorter than 5 characters
     # 
     # Usage:
@@ -33,9 +33,13 @@ module Sequel
       # The default constraint validation metadata table name.
       DEFAULT_CONSTRAINT_VALIDATIONS_TABLE = :sequel_constraint_validations
 
+      # Mapping of operator names in table to ruby operators
+      OPERATOR_MAP = {:str_lt => :<, :str_lte => :<=, :str_gt => :>, :str_gte => :>=,
+                      :int_lt => :<, :int_lte => :<=, :int_gt => :>, :int_gte => :>=}.freeze
+
       # Automatically load the validation_helpers plugin to run the actual validations.
       def self.apply(model, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           plugin :validation_helpers
           @constraint_validations_table = DEFAULT_CONSTRAINT_VALIDATIONS_TABLE
           @constraint_validation_options = {}
@@ -52,7 +56,7 @@ module Sequel
       #                        :presence) and values should be hashes of options specific
       #                        to that validation type.
       def self.configure(model, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           if table = opts[:constraint_validations_table]
             @constraint_validations_table = table
           end
@@ -66,13 +70,6 @@ module Sequel
           end
           parse_constraint_validations
         end
-      end
-
-      module DatabaseMethods
-        # A hash of validation method call metadata for all tables in the database.
-        # The hash is keyed by table name string and contains arrays of validation
-        # method call arrays.
-        attr_accessor :constraint_validations
       end
 
       module ClassMethods
@@ -93,6 +90,18 @@ module Sequel
         Plugins.inherited_instance_variables(self, :@constraint_validations_table=>nil, :@constraint_validation_options=>:hash_dup)
         Plugins.after_set_dataset(self, :parse_constraint_validations)
 
+        # Freeze constraint validations data when freezing model class.
+        def freeze
+          @constraint_validations.freeze.each(&:freeze)
+          @constraint_validation_reflections.freeze.each_value do |v|
+            v.freeze
+            v.each(&:freeze)
+          end
+          @constraint_validation_options.freeze.each_value(&:freeze)
+
+          super
+        end
+
         private
 
         # If the database has not already parsed constraint validation
@@ -102,7 +111,7 @@ module Sequel
         # If this model has associated dataset, use the model's table name
         # to get the validations for just this model.
         def parse_constraint_validations
-          db.extend(DatabaseMethods)
+          db.extension(:_model_constraint_validations)
 
           unless hash = Sequel.synchronize{db.constraint_validations}
             hash = {}
@@ -113,8 +122,7 @@ module Sequel
           end
 
           if @dataset
-            ds = @dataset.clone
-            ds.quote_identifiers = false
+            ds = @dataset.with_quote_identifiers(false)
             table_name = ds.literal(ds.first_source_table)
             reflections = {}
             @constraint_validations = (Sequel.synchronize{hash[table_name]} || []).map{|r| constraint_validation_array(r, reflections)}
@@ -154,6 +162,10 @@ module Sequel
           when :includes_int_range
             arg = constraint_validation_int_range(arg)
             type = :includes
+          when *OPERATOR_MAP.keys
+            arg = arg.to_i if type.to_s =~ /\Aint_/
+            operator = OPERATOR_MAP[type]
+            type = :operator
           end
 
           column = if type == :unique
@@ -163,16 +175,22 @@ module Sequel
           end
 
           if type_opts = @constraint_validation_options[type]
-            opts = opts.merge(type_opts)
+            opts.merge!(type_opts)
           end
 
-          reflection_opts = opts
+          reflection_opts = opts.dup
           a = [:"validates_#{type}"]
+
+          if operator
+            a << operator
+            reflection_opts[:operator] = operator
+          end
 
           if arg
             a << arg
-            reflection_opts = reflection_opts.merge(:argument=>arg)
+            reflection_opts[:argument] = arg
           end 
+
           a << column
           unless opts.empty?
             a << opts
@@ -222,6 +240,7 @@ module Sequel
         def validate
           super
           model.constraint_validations.each do |v|
+            # Allow calling private validation methods
             send(*v)
           end
         end

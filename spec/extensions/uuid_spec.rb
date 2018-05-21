@@ -1,10 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::Uuid" do
   before do
     uuid = @uuid = '57308544-4e83-47b8-b87f-6f68b987f4f9'
     @alt_uuid = 'd5d1ec46-5e8e-4a7b-adc9-50e76b819e19'
-    dc = Object.new
     @c = Class.new(Sequel::Model(:t))
     @c.class_eval do
       columns :id, :uuid
@@ -15,7 +14,6 @@ describe "Sequel::Plugins::Uuid" do
       end
       db.reset
     end
-    @c.dataset.autoid = nil
   end
   
   it "should handle validations on the uuid field for new objects" do
@@ -39,18 +37,15 @@ describe "Sequel::Plugins::Uuid" do
     o.uuid.must_equal @uuid
   end
 
-  if RUBY_VERSION >= '1.9'
-    it "should allow specifying the uuid field via the :field option" do
-      c = Class.new(Sequel::Model(:t))
-      c.class_eval do
-        columns :id, :u
-        plugin :uuid, :field=>:u
-        def _save_refresh(*) end
-      end
-      o = c.create
-      c.db.sqls.first.must_match(/INSERT INTO t \(u\) VALUES \('[-0-9a-f]+'\)/)
-      o.u.must_match /[-0-9a-f]+/
+  it "should allow specifying the uuid field via the :field option" do
+    c = Class.new(Sequel::Model(:t))
+    c.class_eval do
+      columns :id, :u
+      plugin :uuid, :field=>:u
+      def _save_refresh(*) end
     end
+    o = c.create
+    c.db.sqls.must_equal ["INSERT INTO t (u) VALUES ('#{o.u}')"]
   end
 
   it "should not raise an error if the model doesn't have the uuid column" do
@@ -101,6 +96,6 @@ describe "Sequel::Plugins::Uuid" do
     c2.db.reset
     o = c2.create
     o.u.must_equal @uuid
-    c2.db.sqls.first.must_match(/INSERT INTO t \([u]\) VALUES \('#{@uuid}'\)/)
+    c2.db.sqls.must_equal ["INSERT INTO t (u) VALUES ('#{@uuid}')"]
   end
 end

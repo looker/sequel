@@ -43,6 +43,11 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   def disconnect(opts=OPTS)
     (opts[:server] ? Array(opts[:server]) : servers).each{|s| disconnect_server(s)}
   end
+
+  def freeze
+    @servers.freeze
+    super
+  end
   
   # Yields the connection to the supplied block for the given server.
   # This method simulates the ConnectionPool#hold API.
@@ -50,8 +55,8 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
     begin
       server = pick_server(server)
       yield(@conns[server] ||= make_new(server))
-    rescue Sequel::DatabaseDisconnectError
-      disconnect_server(server)
+    rescue Sequel::DatabaseDisconnectError, *@error_classes => e
+      disconnect_server(server) if disconnect_error?(e)
       raise
     end
   end
@@ -61,8 +66,7 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
     1
   end
   
-  # Remove servers from the connection pool. Primarily used in conjunction with master/slave
-  # or shard configurations.  Similar to disconnecting from all given servers,
+  # Remove servers from the connection pool. Similar to disconnecting from all given servers,
   # except that after it is used, future requests for the server will use the
   # :default server instead.
   def remove_servers(servers)
@@ -92,7 +96,7 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   # Disconnect from the given server, if connected.
   def disconnect_server(server)
     if conn = @conns.delete(server)
-      db.disconnect_connection(conn)
+      disconnect_connection(conn)
     end
   end
 
@@ -105,6 +109,4 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   def preconnect(concurrent = nil)
     servers.each{|s| hold(s){}}
   end
-  
-  CONNECTION_POOL_MAP[[true, true]] = self
 end

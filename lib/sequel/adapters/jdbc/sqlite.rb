@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('org.sqlite.JDBC', :SQLite3)
-Sequel.require 'adapters/shared/sqlite'
+require_relative '../shared/sqlite'
 
 module Sequel
   module JDBC
@@ -14,21 +14,16 @@ module Sequel
       end
     end
 
-    # Database and Dataset support for SQLite databases accessed via JDBC.
     module SQLite
-      # Instance methods for SQLite Database objects accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::SQLite::DatabaseMethods
-        LAST_INSERT_ROWID = 'SELECT last_insert_rowid()'.freeze
-        FOREIGN_KEY_ERROR_RE = /query does not return ResultSet/.freeze
         
         # Swallow pointless exceptions when the foreign key list pragma
         # doesn't return any rows.
         def foreign_key_list(table, opts=OPTS)
           super
         rescue Sequel::DatabaseError => e
-          raise unless e.message =~ FOREIGN_KEY_ERROR_RE
+          raise unless foreign_key_error?(e)
           []
         end
 
@@ -37,7 +32,7 @@ module Sequel
         def indexes(table, opts=OPTS)
           super
         rescue Sequel::DatabaseError => e
-          raise unless e.message =~ FOREIGN_KEY_ERROR_RE
+          raise unless foreign_key_error?(e)
           {}
         end
 
@@ -51,7 +46,7 @@ module Sequel
         # Use last_insert_rowid() to get the last inserted id.
         def last_insert_id(conn, opts=OPTS)
           statement(conn) do |stmt|
-            rs = stmt.executeQuery(LAST_INSERT_ROWID)
+            rs = stmt.executeQuery('SELECT last_insert_rowid()')
             rs.next
             rs.getLong(1)
           end
@@ -72,6 +67,11 @@ module Sequel
           conn
         end
 
+        # Whether the given exception is due to a foreign key error.
+        def foreign_key_error?(exception)
+          exception.message =~ /query does not return ResultSet/
+        end
+
         # Use getLong instead of getInt for converting integers on SQLite, since SQLite does not enforce a limit of 2**32.
         # Work around regressions in jdbc-sqlite 3.8.7 for date and blob types.
         def setup_type_convertor_map
@@ -90,6 +90,11 @@ module Sequel
               Sequel::SQL::Blob.new('')
             end
           end
+        end
+
+        # The result code for the exception, if the jdbc driver supports result codes for exceptions.
+        def sqlite_error_code(exception)
+          exception.resultCode.code if exception.respond_to?(:resultCode)
         end
       end
     end

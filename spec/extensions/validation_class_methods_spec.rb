@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 model_class = proc do |klass, &block|
   c = Class.new(klass)
@@ -16,6 +16,19 @@ describe Sequel::Model do
     end
   end
   
+  it "should freeze validation metadata when freezing model class" do
+    @c.validates_acceptance_of(:a)
+    @c.freeze
+    @c.validations.frozen?.must_equal true
+    @c.validations.values.all?(&:frozen?).must_equal true
+    @c.validation_reflections.frozen?.must_equal true
+    @c.validation_reflections.values.all? do |vs|
+      vs.frozen? && vs.all? do |v|
+        v.frozen? && v.last.frozen?
+      end
+    end.must_equal true
+  end
+
   it "should respond to validations, has_validations?, and validation_reflections" do
     @c.must_respond_to(:validations)
     @c.must_respond_to(:has_validations?)
@@ -100,8 +113,8 @@ describe Sequel::Model do
     atts = nil
     o.values.clear
     o.valid?.must_equal true
-    vals.must_equal nil
-    atts.must_equal nil
+    vals.must_be_nil
+    atts.must_be_nil
   end
   
   it "should overwrite existing validation with the same tag and attribute" do
@@ -145,7 +158,7 @@ describe Sequel::Model do
     c.must_equal false
     @c.validates{c = respond_to?(:length_of)}
     c.must_equal true
-  end if RUBY_VERSION >= '1.9'
+  end
 end
 
 describe Sequel::Model do
@@ -175,7 +188,7 @@ describe Sequel::Model do
     @o.score = 86
     @o.wont_be :valid?
     @o.errors[:score].must_equal ['too low']
-    @o.errors.on(:blah).must_equal nil
+    @o.errors.on(:blah).must_be_nil
   end
 end
 
@@ -184,7 +197,7 @@ describe "Sequel::Plugins::ValidationClassMethods::ClassMethods::Generator" do
     @testit = testit = []
     
     @c = model_class.call Sequel::Model do
-      (class << self; self end).send(:define_method, :validates_blah) do
+      singleton_class.send(:define_method, :validates_blah) do
         testit << 1324
       end
     end
@@ -203,7 +216,7 @@ describe Sequel::Model do
     @c = model_class.call Sequel::Model do
       columns :value
       
-      def self.filter(*args)
+      def self.where(*args)
         o = Object.new
         def o.count; 2; end
         o
@@ -620,7 +633,7 @@ describe "Superclass validations" do
   end
   
   it "should have skip_superclass_validations? return whether superclass validations were skipped" do
-    @c2.skip_superclass_validations?.must_equal nil
+    @c2.skip_superclass_validations?.must_be_nil
     @c2.skip_superclass_validations
     @c2.skip_superclass_validations?.must_equal true
   end
@@ -829,7 +842,7 @@ describe Sequel::Model, "Validations" do
         uniqueness_of :username
       end
     end
-    User.dataset._fetch = proc do |sql|
+    User.dataset = User.dataset.with_fetch(proc do |sql|
       case sql
       when /count.*username = '0records'/
         {:v => 0}
@@ -840,7 +853,7 @@ describe Sequel::Model, "Validations" do
       when /username = '1record'/
         {:id => 3, :username => "1record", :password => "test"}
       end
-    end
+    end)
     
     @user = User.new(:username => "2records", :password => "anothertest")
     @user.wont_be :valid?
@@ -876,7 +889,7 @@ describe Sequel::Model, "Validations" do
         uniqueness_of [:username, :password]
       end
     end
-    User.dataset._fetch = proc do |sql|
+    User.dataset = User.dataset.with_fetch(proc do |sql|
       case sql
       when /count.*username = '0records'/
         {:v => 0}
@@ -891,7 +904,7 @@ describe Sequel::Model, "Validations" do
           {:id => 4, :username => "1record", :password => "test"}
         end
       end
-    end
+    end)
     
     @user = User.new(:username => "2records", :password => "anothertest")
     @user.wont_be :valid?
@@ -1022,6 +1035,6 @@ describe "Model#save" do
   
   it "should return nil if validations fail and raise_on_save_faiure is false" do
     @m.raise_on_save_failure = false
-    @m.save.must_equal nil
+    @m.save.must_be_nil
   end
 end

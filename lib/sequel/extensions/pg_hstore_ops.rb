@@ -20,7 +20,7 @@
 # Also, on most Sequel expression objects, you can call the hstore 
 # method:
 #
-#   h = Sequel.expr(:hstore_column).hstore
+#   h = Sequel[:hstore_column].hstore
 #
 # If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
 # or you have loaded the core_refinements extension
@@ -57,10 +57,10 @@
 # Here are a couple examples for updating an existing hstore column:
 #
 #   # Add a key, or update an existing key with a new value
-#   DB[:tab].update(:h=>Sequel.hstore_op(:h).concat('c'=>3))
+#   DB[:tab].update(h: Sequel.hstore_op(:h).concat('c'=>3))
 # 
 #   # Delete a key
-#   DB[:tab].update(:h=>Sequel.hstore_op(:h).delete('k1'))
+#   DB[:tab].update(h: Sequel.hstore_op(:h).delete('k1'))
 #  
 # See the PostgreSQL hstore function and operator documentation for more
 # details on what these functions and operators do.

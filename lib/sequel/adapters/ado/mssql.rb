@@ -1,28 +1,22 @@
 # frozen-string-literal: true
 
-Sequel.require 'adapters/shared/mssql'
+require_relative '../shared/mssql'
 
 module Sequel
   module ADO
-    # Database and Dataset instance methods for MSSQL specific
-    # support via ADO.
     module MSSQL
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::MSSQL::DatabaseMethods
-        # Query to use to get the number of rows affected by an update or
-        # delete query.
-        ROWS_AFFECTED = "SELECT @@ROWCOUNT AS AffectedRows"
-        
         # Issue a separate query to get the rows modified.  ADO appears to
-        # use pass by reference with an integer variable, which is obviously
+        # use pass by reference with an integer variable, which is
         # not supported directly in ruby, and I'm not aware of a workaround.
         def execute_dui(sql, opts=OPTS)
           return super unless @opts[:provider]
           synchronize(opts[:server]) do |conn|
             begin
               log_connection_yield(sql, conn){conn.Execute(sql)}
-              res = log_connection_yield(ROWS_AFFECTED, conn){conn.Execute(ROWS_AFFECTED)}
+              rows_affected_sql = "SELECT @@ROWCOUNT AS AffectedRows"
+              res = log_connection_yield(rows_affected_sql, conn){conn.Execute(rows_affected_sql)}
               res.getRows.transpose.each{|r| return r.shift}
             rescue ::WIN32OLERuntimeError => e
               raise_error(e)
@@ -56,7 +50,7 @@ module Sequel
         # is necessary as ADO's default :provider uses a separate native
         # connection for each query.
         def insert(*values)
-          return super if @opts[:sql]
+          return super if @opts[:sql] || @opts[:returning]
           with_sql("SET NOCOUNT ON; #{insert_sql(*values)}; SELECT CAST(SCOPE_IDENTITY() AS INTEGER)").single_value
         end
         

@@ -34,23 +34,18 @@ module Sequel
 
     # Yield to the block, logging any errors at error level to all loggers,
     # and all other queries with the duration at warn or info level.
-    def log_yield(sql, args=nil, &block)
-      log_connection_yield(sql, nil, args, &block)
-    end
-
-    # Yield to the block, logging any errors at error level to all loggers,
-    # and all other queries with the duration at warn or info level.
     def log_connection_yield(sql, conn, args=nil)
       return yield if @loggers.empty?
       sql = "#{connection_info(conn) if conn && log_connection_info}#{sql}#{"; #{args.inspect}" if args}"
-      start = Time.now
+      timer = Sequel.start_timer
+
       begin
         yield
       rescue => e
         log_exception(e, sql)
         raise
       ensure
-        log_duration(Time.now - start, sql) unless e
+        log_duration(Sequel.elapsed_seconds_since(timer), sql) unless e
       end
     end
 
@@ -72,7 +67,7 @@ module Sequel
     # Log the given SQL and then execute it on the connection, used by
     # the transaction code.
     def log_connection_execute(conn, sql)
-      log_connection_yield(sql, conn){conn.send(connection_execute_method, sql)}
+      log_connection_yield(sql, conn){conn.public_send(connection_execute_method, sql)}
     end
 
     # Log message with message prefixed by duration at info level, or
@@ -84,7 +79,7 @@ module Sequel
     # Log message at level (which should be :error, :warn, or :info)
     # to all loggers.
     def log_each(level, message)
-      @loggers.each{|logger| logger.send(level, message)}
+      @loggers.each{|logger| logger.public_send(level, message)}
     end
   end
 end

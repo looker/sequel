@@ -1,9 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 begin
   require 'nokogiri'
-rescue LoadError => e
-  skip_warn "xml_serializer plugin: can't load nokogiri (#{e.class}: #{e})"
+rescue LoadError
+  warn "Skipping test of xml_serializer plugin: can't load nokogiri"
 else
 describe "Sequel::Plugins::XmlSerializer" do
   before do
@@ -19,7 +19,11 @@ describe "Sequel::Plugins::XmlSerializer" do
       attr_accessor :blah
       plugin :xml_serializer
       columns :id, :name, :artist_id
-      @db_schema = {:id=>{:type=>:integer}, :name=>{:type=>:string}, :artist_id=>{:type=>:integer}}
+      @db_schema2 = @db_schema = {:id=>{:type=>:integer}, :name=>{:type=>:string}, :artist_id=>{:type=>:integer}}
+      def self.set_dataset(*)
+        super
+        @db_schema = @db_schema2
+      end
       many_to_one :artist
     end
     @artist = Artist.load(:id=>2, :name=>'YJM')
@@ -121,30 +125,25 @@ describe "Sequel::Plugins::XmlSerializer" do
   end
 
   it "should support an :encoding option when serializing" do
-    ["<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><id>2</id><name>YJM</name></artist>",
-     "<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><name>YJM</name><id>2</id></artist>"].must_include(@artist.to_xml(:encoding=>'UTF-8').gsub(/\n */m, ''))
+     @artist.to_xml(:encoding=>'UTF-8').gsub(/\n */m, '').must_equal "<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><id>2</id><name>YJM</name></artist>"
   end
 
   it "should support a :builder_opts option when serializing" do
-    ["<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><id>2</id><name>YJM</name></artist>",
-     "<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><name>YJM</name><id>2</id></artist>"].must_include(@artist.to_xml(:builder_opts=>{:encoding=>'UTF-8'}).gsub(/\n */m, ''))
+    @artist.to_xml(:builder_opts=>{:encoding=>'UTF-8'}).gsub(/\n */m, '').must_equal "<?xml version=\"1.0\" encoding=\"UTF-8\"?><artist><id>2</id><name>YJM</name></artist>"
   end
 
   it "should support an :types option when serializing" do
-    ["<?xml version=\"1.0\"?><artist><id type=\"integer\">2</id><name type=\"string\">YJM</name></artist>",
-     "<?xml version=\"1.0\"?><artist><name type=\"string\">YJM</name><id type=\"integer\">2</id></artist>"].must_include(@artist.to_xml(:types=>true).gsub(/\n */m, ''))
+    @artist.to_xml(:types=>true).gsub(/\n */m, '').must_equal "<?xml version=\"1.0\"?><artist><id type=\"integer\">2</id><name type=\"string\">YJM</name></artist>"
   end
 
   it "should support an :root_name option when serializing" do
-    ["<?xml version=\"1.0\"?><ar><id>2</id><name>YJM</name></ar>",
-     "<?xml version=\"1.0\"?><ar><name>YJM</name><id>2</id></ar>"].must_include(@artist.to_xml(:root_name=>'ar').gsub(/\n */m, ''))
+    @artist.to_xml(:root_name=>'ar').gsub(/\n */m, '').must_equal "<?xml version=\"1.0\"?><ar><id>2</id><name>YJM</name></ar>"
   end
 
   it "should support an :array_root_name option when serializing arrays" do
     artist = @artist
-    Artist.dataset.meta_def(:all){[artist]}
-    ["<?xml version=\"1.0\"?><ars><ar><id>2</id><name>YJM</name></ar></ars>",
-     "<?xml version=\"1.0\"?><ars><ar><name>YJM</name><id>2</id></ar></ars>"].must_include(Artist.to_xml(:array_root_name=>'ars', :root_name=>'ar').gsub(/\n */m, ''))
+    Artist.dataset = Artist.dataset.with_extend{define_method(:all){[artist]}}
+    Artist.to_xml(:array_root_name=>'ars', :root_name=>'ar').gsub(/\n */m, '').must_equal "<?xml version=\"1.0\"?><ars><ar><id>2</id><name>YJM</name></ar></ars>"
   end
 
   it "should raise an exception for xml tags that aren't associations, columns, or setter methods" do
@@ -154,7 +153,7 @@ describe "Sequel::Plugins::XmlSerializer" do
 
   it "should support a to_xml class and dataset method" do
     album = @album
-    Album.dataset.meta_def(:all){[album]}
+    Album.dataset = Album.dataset.with_extend{define_method(:all){[album]}}
     Album.array_from_xml(Album.to_xml).must_equal [@album]
     Album.array_from_xml(Album.to_xml(:include=>:artist), :associations=>:artist).map{|x| x.artist}.must_equal [@artist]
     Album.array_from_xml(Album.dataset.to_xml(:only=>:name)).must_equal [Album.load(:name=>@album.name)]
@@ -171,6 +170,13 @@ describe "Sequel::Plugins::XmlSerializer" do
     x = Artist.array_from_xml(Artist.to_xml(:array=>[artist], :include=>:albums), :associations=>[:albums])
     x.must_equal [artist]
     x.first.albums.must_equal [a]
+  end
+
+  it "should work correctly for eager graphed datasets" do
+    ds = Album.dataset.eager_graph(:artist).with_fetch(:id=>1, :name=>'RF', :artist_id=>2, :artist_id_0=>2, :artist_name=>'YJM')
+    albums = Album.array_from_xml(ds.to_xml(:only=>:name, :include=>{:artist=>{:only=>:name}}), :associations=>:artist)
+    albums.must_equal [Album.load(:name=>@album.name)]
+    albums.first.artist.must_equal Artist.load(:name=>@artist.name)
   end
 
   it "should raise an error if the dataset does not have a row_proc" do

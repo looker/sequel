@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('org.hsqldb.jdbcDriver', :HSQLDB)
-Sequel.require 'adapters/jdbc/transactions'
+require_relative 'transactions'
 
 module Sequel
   module JDBC
@@ -13,18 +13,17 @@ module Sequel
       end
     end
 
-    # Database and Dataset support for HSQLDB databases accessed via JDBC.
     module HSQLDB
-      # Instance methods for HSQLDB Database objects accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Asys_idx_sys_pk_/i.freeze
-
         include ::Sequel::JDBC::Transactions
 
-        # HSQLDB uses the :hsqldb database type.
         def database_type
           :hsqldb
+        end
+
+        def freeze
+          db_version
+          super
         end
 
         # HSQLDB uses an IDENTITY sequence as the default value for primary
@@ -35,11 +34,10 @@ module Sequel
 
         # The version of the database, as an integer (e.g 2.2.5 -> 20205)
         def db_version
-          @db_version ||= begin
-            v = get{DATABASE_VERSION(){}}
-            if v =~ /(\d+)\.(\d+)\.(\d+)/
-              $1.to_i * 10000 + $2.to_i * 100 + $3.to_i
-            end
+          return @db_version if defined?(@db_version)
+          v = get(Sequel.function(:DATABASE_VERSION))
+          @db_version = if v =~ /(\d+)\.(\d+)\.(\d+)/
+            $1.to_i * 10000 + $2.to_i * 100 + $3.to_i
           end
         end
         
@@ -50,13 +48,12 @@ module Sequel
 
         private
         
-        # HSQLDB specific SQL for renaming columns, and changing column types and/or nullity.
         def alter_table_sql(table, op)
           case op[:op]
           when :add_column
             if op[:table]
               [super(table, op.merge(:table=>nil)),
-               alter_table_sql(table, op.merge(:op=>:add_constraint, :type=>:foreign_key, :name=>op[:foreign_key_name], :columns=>[op[:name]], :table=>op[:table]))]
+               alter_table_sql(table, op.merge(:op=>:add_constraint, :type=>:foreign_key, :name=>op[:foreign_key_constraint_name], :columns=>[op[:name]], :table=>op[:table]))]
             else
               super
             end
@@ -109,7 +106,7 @@ module Sequel
         
         # Primary key indexes appear to start with sys_idx_sys_pk_ on HSQLDB
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
+          /\Asys_idx_sys_pk_/i
         end
 
         # If an :identity option is present in the column, add the necessary IDENTITY SQL.
@@ -140,17 +137,7 @@ module Sequel
         end
       end
       
-      # Dataset class for HSQLDB datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        BOOL_TRUE = 'TRUE'.freeze
-        BOOL_FALSE = 'FALSE'.freeze
-        SQL_WITH_RECURSIVE = "WITH RECURSIVE ".freeze
-        APOS = Dataset::APOS
-        HSTAR = "H*".freeze
-        BLOB_OPEN = "X'".freeze
-        DEFAULT_FROM = " FROM (VALUES (0))".freeze
-        TIME_FORMAT = "'%H:%M:%S'".freeze
-
         # Handle HSQLDB specific case insensitive LIKE and bitwise operator support.
         def complex_expression_sql_append(sql, op, args)
           case op
@@ -195,27 +182,27 @@ module Sequel
         private
 
         def empty_from_sql
-          DEFAULT_FROM
+          " FROM (VALUES (0))"
         end
         
         # Use string in hex format for blob data.
         def literal_blob_append(sql, v)
-          sql << BLOB_OPEN << v.unpack(HSTAR).first << APOS
+          sql << "X'" << v.unpack("H*").first << "'"
         end
 
         # HSQLDB uses FALSE for false values.
         def literal_false
-          BOOL_FALSE
+          'FALSE'
         end
 
         # HSQLDB handles fractional seconds in timestamps, but not in times
         def literal_sqltime(v)
-          v.strftime(TIME_FORMAT)
+          v.strftime("'%H:%M:%S'")
         end
 
         # HSQLDB uses TRUE for true values.
         def literal_true
-          BOOL_TRUE
+          'TRUE'
         end
 
         # HSQLDB supports multiple rows in INSERT.
@@ -225,7 +212,7 @@ module Sequel
 
         # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
         def select_with_sql_base
-          opts[:with].any?{|w| w[:recursive]} ? SQL_WITH_RECURSIVE : super
+          opts[:with].any?{|w| w[:recursive]} ? "WITH RECURSIVE " : super
         end
       end
     end

@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model::DatasetMethods, "#destroy"  do
   before do
@@ -9,7 +9,7 @@ describe Sequel::Model::DatasetMethods, "#destroy"  do
       end
     end
     @d = @c.dataset
-    @d._fetch = [{:id=>1}, {:id=>2}]
+    @d = @d.with_fetch([{:id=>1}, {:id=>2}])
     DB.reset
   end
 
@@ -20,7 +20,7 @@ describe Sequel::Model::DatasetMethods, "#destroy"  do
 
   it "should return the number of records destroyed" do
     @d.destroy.must_equal 2
-    @d._fetch = [[{:i=>1}], []]
+    @d = @d.with_fetch([[{:id=>1}], []])
     @d.destroy.must_equal 1
     @d.destroy.must_equal 0
   end
@@ -38,7 +38,7 @@ describe Sequel::Model::DatasetMethods, "#destroy"  do
   end
 end
 
-describe Sequel::Model::DatasetMethods, "#to_hash"  do
+describe Sequel::Model::DatasetMethods, "#as_hash"  do
   before do
     @c = Class.new(Sequel::Model(:items)) do
       set_primary_key :name
@@ -47,7 +47,16 @@ describe Sequel::Model::DatasetMethods, "#to_hash"  do
   end
 
   it "should result in a hash with primary key value keys and model object values" do
-    @d._fetch = [{:name=>1}, {:name=>2}]
+    @d = @d.with_fetch([{:name=>1}, {:name=>2}])
+    h = @d.as_hash
+    h.must_be_kind_of(Hash)
+    a = h.to_a
+    a.collect{|x| x[1].class}.must_equal [@c, @c]
+    a.sort_by{|x| x[0]}.collect{|x| [x[0], x[1].values]}.must_equal [[1, {:name=>1}], [2, {:name=>2}]]
+  end
+
+  it "should be aliased as to_hash" do
+    @d = @d.with_fetch([{:name=>1}, {:name=>2}])
     h = @d.to_hash
     h.must_be_kind_of(Hash)
     a = h.to_a
@@ -56,8 +65,8 @@ describe Sequel::Model::DatasetMethods, "#to_hash"  do
   end
 
   it "should result in a hash with given value keys and model object values" do
-    @d._fetch = [{:name=>1, :number=>3}, {:name=>2, :number=>4}]
-    h = @d.to_hash(:number)
+    @d = @d.with_fetch([{:name=>1, :number=>3}, {:name=>2, :number=>4}])
+    h = @d.as_hash(:number)
     h.must_be_kind_of(Hash)
     a = h.to_a
     a.collect{|x| x[1].class}.must_equal [@c, @c]
@@ -66,7 +75,7 @@ describe Sequel::Model::DatasetMethods, "#to_hash"  do
 
   it "should raise an error if the class doesn't have a primary key" do
     @c.no_primary_key
-    proc{@d.to_hash}.must_raise(Sequel::Error)
+    proc{@d.as_hash}.must_raise(Sequel::Error)
   end
 end
 
@@ -75,24 +84,6 @@ describe Sequel::Model::DatasetMethods  do
     @c = Class.new(Sequel::Model(:items))
     @c.columns :id
     @c.db.reset
-  end
-
-  it "#join_table should allow use to use a model class when joining" do
-    @c.join(Class.new(Sequel::Model(:categories)), :item_id => :id).sql.must_equal 'SELECT * FROM items INNER JOIN categories ON (categories.item_id = items.id)'
-  end
-
-  it "#join_table should handle model classes that aren't simple selects using a subselect" do
-    @c.join(Class.new(Sequel::Model(DB[:categories].where(:foo=>1))), :item_id => :id).sql.must_equal 'SELECT * FROM items INNER JOIN (SELECT * FROM categories WHERE (foo = 1)) AS t1 ON (t1.item_id = items.id)'
-  end
-
-  it "#graph should allow use to use a model class when joining" do
-    c = Class.new(Sequel::Model(:categories))
-    c.columns :id
-    @c.graph(c, :item_id => :id).sql.must_equal 'SELECT items.id, categories.id AS categories_id FROM items LEFT OUTER JOIN categories ON (categories.item_id = items.id)'
-  end
-
-  it "#insert_sql should handle a single model instance as an argument" do
-    @c.dataset.insert_sql(@c.load(:id=>1)).must_equal 'INSERT INTO items (id) VALUES (1)'
   end
 
   it "#first should handle no primary key" do
@@ -105,7 +96,7 @@ describe Sequel::Model::DatasetMethods  do
     @c.last.must_be_kind_of(@c)
     @c.db.sqls.must_equal ['SELECT * FROM items ORDER BY id DESC LIMIT 1']
     @c.where(:id=>2).last(:foo=>2){{bar=>3}}.must_be_kind_of(@c)
-    @c.db.sqls.must_equal ['SELECT * FROM items WHERE ((id = 2) AND (bar = 3) AND (foo = 2)) ORDER BY id DESC LIMIT 1']
+    @c.db.sqls.must_equal ['SELECT * FROM items WHERE ((id = 2) AND (foo = 2) AND (bar = 3)) ORDER BY id DESC LIMIT 1']
   end
 
   it "#last should use existing order if there is one" do
@@ -147,3 +138,61 @@ describe Sequel::Model::DatasetMethods  do
     proc{@c.paged_each{|r| }}.must_raise(Sequel::Error)
   end
 end 
+
+describe Sequel::Model::DatasetMethods, "#where_all"  do
+  before do
+    @c = Class.new(Sequel::Model(DB[:items].freeze))
+    DB.reset
+  end
+
+  it "should filter dataset with condition, and return related rows" do
+    5.times do
+      @c.where_all(:id=>1).must_equal [@c.load(:id=>1, :x=>1)]
+      @c.db.sqls.must_equal ['SELECT * FROM items WHERE (id = 1)']
+    end
+  end
+
+  it "should yield each row to the given block" do
+    5.times do
+      a = []
+      @c.where_all(:id=>1){|r| a << r}.must_equal [@c.load(:id=>1, :x=>1)]
+      a.must_equal [@c.load(:id=>1, :x=>1)]
+      @c.db.sqls.must_equal ['SELECT * FROM items WHERE (id = 1)']
+    end
+  end
+end
+
+describe Sequel::Model::DatasetMethods, "#where_each"  do
+  before do
+    @c = Class.new(Sequel::Model(DB[:items].freeze))
+    DB.reset
+  end
+
+  it "should yield each row to the given block" do
+    5.times do
+      a = []
+      @c.where_each(:id=>1){|r| a << r}
+      a.must_equal [@c.load(:id=>1, :x=>1)]
+      @c.db.sqls.must_equal ['SELECT * FROM items WHERE (id = 1)']
+    end
+  end
+end
+
+describe Sequel::Model::DatasetMethods, "#where_single_value"  do
+  before do
+    @c = Class.new(Sequel::Model(DB[:items].freeze))
+    @c.class_eval do
+      dataset_module do
+        select :only_id, :id
+      end
+    end
+    DB.reset
+  end
+
+  it "should return single value" do
+    5.times do
+      @c.only_id.where_single_value(:id=>1).must_equal 1
+      @c.db.sqls.must_equal ['SELECT id FROM items WHERE (id = 1) LIMIT 1']
+    end
+  end
+end

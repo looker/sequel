@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
+require_relative "spec_helper"
 
 describe "Prepared Statements and Bound Arguments" do
   before do
@@ -22,6 +22,7 @@ describe "Prepared Statements and Bound Arguments" do
     @ds.filter(:numb=>:$n).call(:all, :n=>10).must_equal [{:id=>1, :numb=>10}]
     @ds.filter(:numb=>:$n).call(:first, :n=>10).must_equal(:id=>1, :numb=>10)
     @ds.filter(:numb=>:$n).call([:map, :numb], :n=>10).must_equal [10]
+    @ds.filter(:numb=>:$n).call([:as_hash, :id, :numb], :n=>10).must_equal(1=>10)
     @ds.filter(:numb=>:$n).call([:to_hash, :id, :numb], :n=>10).must_equal(1=>10)
     @ds.filter(:numb=>:$n).call([:to_hash_groups, :id, :numb], :n=>10).must_equal(1=>[10])
   end
@@ -161,6 +162,8 @@ describe "Prepared Statements and Bound Arguments" do
     @db.call(:select_n, :n=>10).must_equal(:id=>1, :numb=>10)
     @ds.filter(:numb=>:$n).prepare([:map, :numb], :select_n)
     @db.call(:select_n, :n=>10).must_equal [10]
+    @ds.filter(:numb=>:$n).prepare([:as_hash, :id, :numb], :select_n)
+    @db.call(:select_n, :n=>10).must_equal(1=>10)
     @ds.filter(:numb=>:$n).prepare([:to_hash, :id, :numb], :select_n)
     @db.call(:select_n, :n=>10).must_equal(1=>10)
   end
@@ -316,7 +319,7 @@ describe "Bound Argument Types" do
       TrueClass :b
     end
     @ds = @db[:items]
-    @vs = {:d=>Date.civil(2010, 10, 11), :dt=>DateTime.civil(2010, 10, 12, 13, 14, 15), :f=>1.0, :s=>'str', :t=>Time.at(20101010), :file=>Sequel::SQL::Blob.new('blob'), :b=>true}
+    @vs = {:d=>Date.civil(2010, 10, 11), :dt=>DateTime.civil(2010, 10, 12, 13, 14, 15), :f=>1.0, :s=>'str', :t=>Time.at(Time.now.to_i), :file=>Sequel::SQL::Blob.new('blob'), :b=>true}
   end
   before do
     @ds.delete
@@ -329,27 +332,27 @@ describe "Bound Argument Types" do
     @db.drop_table?(:items)
   end
 
-  cspecify "should handle date type", [:do, :sqlite], [:tinytds], [:jdbc, :mssql], [:jdbc, :sqlite], :oracle do 
+  cspecify "should handle date type", [:tinytds], [:jdbc, :mssql], [:jdbc, :sqlite], :oracle do 
     @ds.filter(:d=>:$x).prepare(:first, :ps_date).call(:x=>@vs[:d])[:d].must_equal @vs[:d]
   end
 
-  cspecify "should handle datetime type", [:do], [:mysql2], [:jdbc, :sqlite], [:tinytds], [:oracle] do
+  cspecify "should handle datetime type", [:mysql2], [:jdbc, :sqlite], [:tinytds], [:oracle] do
     Sequel.datetime_class = DateTime
     @ds.filter(:dt=>:$x).prepare(:first, :ps_datetime).call(:x=>@vs[:dt])[:dt].must_equal @vs[:dt]
   end
 
-  cspecify "should handle datetime type with fractional seconds", [:do, :postgres], [:jdbc, :sqlite], [:oracle] do
+  cspecify "should handle datetime type with fractional seconds", [:jdbc, :sqlite], [:jdbc, :mysql], [:oracle] do
     Sequel.datetime_class = DateTime
     fract_time = DateTime.parse('2010-10-12 13:14:15.500000')
     @ds.prepare(:update, :ps_datetime_up, :dt=>:$x).call(:x=>fract_time)
     @ds.literal(@ds.filter(:dt=>:$x).prepare(:first, :ps_datetime).call(:x=>fract_time)[:dt]).must_equal @ds.literal(fract_time)
   end
 
-  cspecify "should handle time type", [:do], [:jdbc, :sqlite], [:swift], [:oracle] do
+  cspecify "should handle time type", [:jdbc, :sqlite] do
     @ds.filter(:t=>:$x).prepare(:first, :ps_time).call(:x=>@vs[:t])[:t].must_equal @vs[:t]
   end
 
-  cspecify "should handle time type with fractional seconds", [:do, :postgres], [:jdbc, :sqlite], [:oracle], [:swift, :postgres] do
+  cspecify "should handle time type with fractional seconds", [:jdbc, :sqlite], [:jdbc, :mysql] do
     fract_time = @vs[:t] + 0.5
     @ds.prepare(:update, :ps_time_up, :t=>:$x).call(:x=>fract_time)
     @ds.literal(@ds.filter(:t=>:$x).prepare(:first, :ps_time).call(:x=>fract_time)[:t]).must_equal @ds.literal(fract_time)
@@ -371,7 +374,7 @@ describe "Bound Argument Types" do
   cspecify "should handle blob type with nil values", [:oracle], [:tinytds], [:jdbc, :mssql] do
     @ds.delete
     @ds.prepare(:insert, :ps_blob, {:file=>:$x}).call(:x=>nil)
-    @ds.get(:file).must_equal nil
+    @ds.get(:file).must_be_nil
   end
 
   cspecify "should handle blob type with embedded zeros", [:odbc] do
@@ -381,7 +384,7 @@ describe "Bound Argument Types" do
     @ds.get(:file).must_equal zero_blob
   end
 
-  cspecify "should handle float type", [:swift, :sqlite] do
+  it "should handle float type" do
     @ds.filter(:f=>:$x).prepare(:first, :ps_float).call(:x=>@vs[:f])[:f].must_equal @vs[:f]
   end
 
@@ -389,79 +392,7 @@ describe "Bound Argument Types" do
     @ds.filter(:s=>:$x).prepare(:first, :ps_string).call(:x=>@vs[:s])[:s].must_equal @vs[:s]
   end
 
-  cspecify "should handle boolean type", [:do, :sqlite], [:jdbc, :sqlite], [:jdbc, :db2], :oracle do
+  cspecify "should handle boolean type", [:jdbc, :sqlite], [:jdbc, :db2], :oracle do
     @ds.filter(:b=>:$x).prepare(:first, :ps_string).call(:x=>@vs[:b])[:b].must_equal @vs[:b]
   end
 end
-
-describe "Dataset#unbind" do
-  before do
-    @ds = ds = DB[:items]
-    @ct = proc do |t, v|
-      DB.create_table!(:items) do
-        column :c, t
-      end
-      ds.insert(:c=>v)
-    end
-    @u = proc{|ds1| ds2, bv = ds1.unbind; ds2.call(:first, bv)}
-  end
-  after do
-    DB.drop_table?(:items)
-  end
-  
-  it "should unbind values assigned to equality and inequality statements" do
-    @ct[Integer, 10]
-    @u[@ds.filter(:c=>10)].must_equal(:c=>10)
-    @u[@ds.exclude(:c=>10)].must_equal nil
-    @u[@ds.filter{c < 10}].must_equal nil
-    @u[@ds.filter{c <= 10}].must_equal(:c=>10)
-    @u[@ds.filter{c > 10}].must_equal nil
-    @u[@ds.filter{c >= 10}].must_equal(:c=>10)
-  end
-
-  cspecify "should handle numerics and strings", [:odbc], [:swift, :sqlite] do
-    @ct[Integer, 10]
-    @u[@ds.filter(:c=>10)].must_equal(:c=>10)
-    @ct[Float, 0.0]
-    @u[@ds.filter{c < 1}].must_equal(:c=>0.0)
-    @ct[String, 'foo']
-    @u[@ds.filter(:c=>'foo')].must_equal(:c=>'foo')
-
-    DB.create_table!(:items) do
-      BigDecimal :c, :size=>[15,2]
-    end
-    @ds.insert(:c=>BigDecimal.new('1.1'))
-    @u[@ds.filter{c > 0}].must_equal(:c=>BigDecimal.new('1.1'))
-  end
-
-  cspecify "should handle dates and times", [:do], [:jdbc, :mssql], [:jdbc, :sqlite], [:swift], [:tinytds], :oracle do
-    @ct[Date, Date.today]
-    @u[@ds.filter(:c=>Date.today)].must_equal(:c=>Date.today)
-    t = Time.now
-    @ct[Time, t]
-    @u[@ds.filter{c < t + 1}][:c].to_i.must_equal t.to_i
-  end
-
-  it "should handle QualifiedIdentifiers" do
-    @ct[Integer, 10]
-    @u[@ds.filter{items__c > 1}].must_equal(:c=>10)
-  end
-
-  cspecify "should handle deep nesting", :h2 do
-    DB.create_table!(:items) do
-      Integer :a
-      Integer :b
-      Integer :c
-      Integer :d
-    end
-    @ds.insert(:a=>2, :b=>0, :c=>3, :d=>5)
-    @u[@ds.filter{a > 1}.and{b < 2}.or(:c=>3).and(Sequel.case({~Sequel.expr(:d=>4)=>1}, 0) => 1)].must_equal(:a=>2, :b=>0, :c=>3, :d=>5)
-    @u[@ds.filter{a > 1}.and{b < 2}.or(:c=>3).and(Sequel.case({~Sequel.expr(:d=>5)=>1}, 0) => 1)].must_equal nil
-  end
-
-  it "should handle case where the same variable has the same value in multiple places " do
-    @ct[Integer, 1]
-    @u[@ds.filter{c > 1}.or{c < 1}.invert].must_equal(:c=>1)
-    @u[@ds.filter{c > 1}.or{c < 1}].must_equal nil
-  end
-end    

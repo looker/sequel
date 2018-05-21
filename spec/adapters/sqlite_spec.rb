@@ -1,55 +1,17 @@
 SEQUEL_ADAPTER_TEST = :sqlite
 
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
+require_relative 'spec_helper'
 
 describe "An SQLite database" do
   before do
     @db = DB
-    @fk = @db.foreign_keys
   end
   after do
     @db.drop_table?(:fk)
-    @db.auto_vacuum = :none
-    @db.run 'VACUUM'
-    @db.foreign_keys = @fk
-    @db.case_sensitive_like = true
     @db.use_timestamp_timezones = false
     Sequel.datetime_class = Time
   end
 
-  it "should support getting setting pragma values" do
-    @db.pragma_set(:auto_vacuum, '0')
-    @db.run 'VACUUM'
-    @db.pragma_get(:auto_vacuum).to_s.must_equal '0'
-    @db.pragma_set(:auto_vacuum, '1')
-    @db.run 'VACUUM'
-    @db.pragma_get(:auto_vacuum).to_s.must_equal '1'
-    @db.pragma_set(:auto_vacuum, '2')
-    @db.run 'VACUUM'
-    @db.pragma_get(:auto_vacuum).to_s.must_equal '2'
-  end
-  
-  it "should support getting and setting the auto_vacuum pragma" do
-    @db.auto_vacuum = :full
-    @db.run 'VACUUM'
-    @db.auto_vacuum.must_equal :full
-    @db.auto_vacuum = :incremental
-    @db.run 'VACUUM'
-    @db.auto_vacuum.must_equal :incremental
-    
-    proc {@db.auto_vacuum = :invalid}.must_raise(Sequel::Error)
-  end
-  
-  it "should respect case sensitive like false" do
-    @db.case_sensitive_like = false
-    @db.get(Sequel.like('a', 'A')).to_s.must_equal '1'
-  end
-  
-  it "should respect case sensitive like true" do
-    @db.case_sensitive_like = true
-    @db.get(Sequel.like('a', 'A')).to_s.must_equal '0'
-  end
-  
   it "should support casting to Date by using the date function" do
     @db.get(Sequel.cast('2012-10-20 11:12:13', Date)).must_equal '2012-10-20'
   end
@@ -61,28 +23,6 @@ describe "An SQLite database" do
   
   it "should provide the SQLite version as an integer" do
     @db.sqlite_version.must_be_kind_of(Integer)
-  end
-  
-  it "should support setting and getting the foreign_keys pragma" do
-    (@db.sqlite_version >= 30619 ? [true, false] : [nil]).must_include(@db.foreign_keys)
-    @db.foreign_keys = true
-    @db.foreign_keys = false
-  end
-  
-  it "should enforce foreign key integrity if foreign_keys pragma is set" do
-    @db.foreign_keys = true
-    @db.create_table!(:fk){primary_key :id; foreign_key :parent_id, :fk}
-    @db[:fk].insert(1, nil)
-    @db[:fk].insert(2, 1)
-    @db[:fk].insert(3, 3)
-    proc{@db[:fk].insert(4, 5)}.must_raise(Sequel::ForeignKeyConstraintViolation, Sequel::ConstraintViolation, Sequel::DatabaseError)
-  end if DB.sqlite_version >= 30619
-  
-  it "should not enforce foreign key integrity if foreign_keys pragma is unset" do
-    @db.foreign_keys = false
-    @db.create_table!(:fk){primary_key :id; foreign_key :parent_id, :fk}
-    @db[:fk].insert(1, 2)
-    @db[:fk].all.must_equal [{:id=>1, :parent_id=>2}]
   end
   
   it "should support a use_timestamp_timezones setting" do
@@ -104,33 +44,11 @@ describe "An SQLite database" do
     @db.tables.must_include(:fk)
   end
 
-  it "should support getting and setting the synchronous pragma" do
-    @db.synchronous = :off
-    @db.synchronous.must_equal :off
-    @db.synchronous = :normal
-    @db.synchronous.must_equal :normal
-    @db.synchronous = :full
-    @db.synchronous.must_equal :full
-    
-    proc {@db.synchronous = :invalid}.must_raise(Sequel::Error)
-  end
-  
-  it "should support getting and setting the temp_store pragma" do
-    @db.temp_store = :default
-    @db.temp_store.must_equal :default
-    @db.temp_store = :file
-    @db.temp_store.must_equal :file
-    @db.temp_store = :memory
-    @db.temp_store.must_equal :memory
-    
-    proc {@db.temp_store = :invalid}.must_raise(Sequel::Error)
-  end
-  
-  cspecify "should support timestamps and datetimes and respect datetime_class", [:do], [:jdbc], [:swift] do
+  cspecify "should support timestamps and datetimes and respect datetime_class", [:jdbc] do
     @db.create_table!(:fk){timestamp :t; datetime :d}
     @db.use_timestamp_timezones = true
     t1 = Time.at(1)
-    @db[:fk] << {:t => t1, :d => t1}
+    @db[:fk].insert(:t => t1, :d => t1)
     @db[:fk].map(:t).must_equal [t1]
     @db[:fk].map(:d).must_equal [t1]
     Sequel.datetime_class = DateTime
@@ -141,9 +59,9 @@ describe "An SQLite database" do
   
   it "should support sequential primary keys" do
     @db.create_table!(:fk) {primary_key :id; text :name}
-    @db[:fk] << {:name => 'abc'}
-    @db[:fk] << {:name => 'def'}
-    @db[:fk] << {:name => 'ghi'}
+    @db[:fk].insert(:name => 'abc')
+    @db[:fk].insert(:name => 'def')
+    @db[:fk].insert(:name => 'ghi')
     @db[:fk].order(:name).all.must_equal [
       {:id => 1, :name => 'abc'},
       {:id => 2, :name => 'def'},
@@ -190,6 +108,24 @@ describe "SQLite temporary views" do
   end
 end
     
+describe "SQLite VALUES support" do
+  before do
+    @db = DB
+  end
+
+  it "should create a dataset using the VALUES clause via #values" do
+    @db.values([[1, 2], [3, 4]]).map([:column1, :column2]).must_equal [[1, 2], [3, 4]]
+  end
+
+  it "should support VALUES with unions" do
+    @db.values([[1]]).union(@db.values([[3]])).map(&:values).map(&:first).must_equal [1, 3]
+  end
+
+  it "should support VALUES in CTEs" do
+    @db[:a].cross_join(:b).with(:a, @db.values([[1, 2]]), :args=>[:c1, :c2]).with(:b, @db.values([[3, 4]]), :args=>[:c3, :c4]).map([:c1, :c2, :c3, :c4]).must_equal [[1, 2, 3, 4]]
+  end
+end if DB.sqlite_version >= 30803
+
 describe "SQLite type conversion" do
   before do
     @db = DB
@@ -279,7 +215,7 @@ end if DB.adapter_scheme == :sqlite
 
 describe "An SQLite dataset" do
   before do
-    @d = DB[:items]
+    @d = DB.dataset
   end
   
   it "should raise errors if given a regexp pattern match" do
@@ -287,32 +223,6 @@ describe "An SQLite dataset" do
     proc{@d.literal(~Sequel.expr(:x).like(/a/))}.must_raise(Sequel::InvalidOperation)
     proc{@d.literal(Sequel.expr(:x).like(/a/i))}.must_raise(Sequel::InvalidOperation)
     proc{@d.literal(~Sequel.expr(:x).like(/a/i))}.must_raise(Sequel::InvalidOperation)
-  end
-end
-
-describe "An SQLite dataset AS clause" do
-  it "should use a string literal for :col___alias" do
-    DB.literal(:c___a).must_equal "`c` AS 'a'"
-  end
-
-  it "should use a string literal for :table__col___alias" do
-    DB.literal(:t__c___a).must_equal "`t`.`c` AS 'a'"
-  end
-
-  it "should use a string literal for :column.as(:alias)" do
-    DB.literal(Sequel.as(:c, :a)).must_equal "`c` AS 'a'"
-  end
-
-  it "should use a string literal in the SELECT clause" do
-    DB[:t].select(:c___a).sql.must_equal "SELECT `c` AS 'a' FROM `t`"
-  end
-
-  it "should use a string literal in the FROM clause" do
-    DB[:t___a].sql.must_equal "SELECT * FROM `t` AS 'a'"
-  end
-
-  it "should use a string literal in the JOIN clause" do
-    DB[:t].join_table(:natural, :j, nil, :table_alias=>:a).sql.must_equal "SELECT * FROM `t` NATURAL JOIN `j` AS 'a'"
   end
 end
 
@@ -325,9 +235,12 @@ describe "SQLite::Dataset#delete" do
     end
     @d = DB[:items]
     @d.delete # remove all records
-    @d << {:name => 'abc', :value => 1.23}
-    @d << {:name => 'def', :value => 4.56}
-    @d << {:name => 'ghi', :value => 7.89}
+    @d.insert(:name => 'abc', :value => 1.23)
+    @d.insert(:name => 'def', :value => 4.56)
+    @d.insert(:name => 'ghi', :value => 7.89)
+  end
+  after do
+    DB.drop_table?(:items)
   end
   
   it "should return the number of records affected when filtered" do
@@ -357,9 +270,9 @@ describe "SQLite::Dataset#update" do
     end
     @d = DB[:items]
     @d.delete # remove all records
-    @d << {:name => 'abc', :value => 1.23}
-    @d << {:name => 'def', :value => 4.56}
-    @d << {:name => 'ghi', :value => 7.89}
+    @d.insert(:name => 'abc', :value => 1.23)
+    @d.insert(:name => 'def', :value => 4.56)
+    @d.insert(:name => 'ghi', :value => 7.89)
   end
   
   it "should return the number of records affected" do
@@ -419,16 +332,16 @@ describe "SQLite dataset" do
       Float :value
     end
     @d = DB[:items]
-    @d << {:name => 'abc', :value => 1.23}
-    @d << {:name => 'def', :value => 4.56}
-    @d << {:name => 'ghi', :value => 7.89}
+    @d.insert(:name => 'abc', :value => 1.23)
+    @d.insert(:name => 'def', :value => 4.56)
+    @d.insert(:name => 'ghi', :value => 7.89)
   end
   after do
     DB.drop_table?(:test, :items)
   end
   
   it "should be able to insert from a subquery" do
-    DB[:test] << @d
+    DB[:test].insert(@d)
     DB[:test].count.must_equal 3
     DB[:test].select(:name, :value).order(:value).to_a.must_equal \
       @d.select(:name, :value).order(:value).to_a
@@ -439,10 +352,8 @@ describe "SQLite dataset" do
   end
   
   it "should have #explain work when identifier_output_method is modified" do
-    ds = DB[:test]
-    ds.identifier_output_method = :upcase
-    ds.explain.must_be_kind_of(String)
-  end
+    DB[:test].with_identifier_output_method(:upcase).explain.must_be_kind_of(String)
+  end if IDENTIFIER_MANGLING
 end
 
 describe "A SQLite database" do
@@ -454,28 +365,28 @@ describe "A SQLite database" do
     end
   end
   after do
-    @db.drop_table?(:test2)
+    @db.drop_table?(:test, :test2, :test3, :test3_backup0, :test3_backup1, :test3_backup2)
   end
 
   it "should support add_column operations" do
     @db.add_column :test2, :xyz, :text
     
     @db[:test2].columns.must_equal [:name, :value, :xyz]
-    @db[:test2] << {:name => 'mmm', :value => 111, :xyz=>'000'}
+    @db[:test2].insert(:name => 'mmm', :value => 111, :xyz=>'000')
     @db[:test2].first.must_equal(:name => 'mmm', :value => 111, :xyz=>'000')
   end
   
   it "should support drop_column operations" do
     @db.drop_column :test2, :value
     @db[:test2].columns.must_equal [:name]
-    @db[:test2] << {:name => 'mmm'}
+    @db[:test2].insert(:name => 'mmm')
     @db[:test2].first.must_equal(:name => 'mmm')
   end
   
   it "should support drop_column operations in a transaction" do
     @db.transaction{@db.drop_column :test2, :value}
     @db[:test2].columns.must_equal [:name]
-    @db[:test2] << {:name => 'mmm'}
+    @db[:test2].insert(:name => 'mmm')
     @db[:test2].first.must_equal(:name => 'mmm')
   end
 
@@ -483,9 +394,9 @@ describe "A SQLite database" do
     @db.create_table!(:test2){Integer :a; Integer :b; Integer :c; primary_key [:a, :b]}
     @db.drop_column :test2, :c
     @db[:test2].columns.must_equal [:a, :b]
-    @db[:test2] << {:a=>1, :b=>2}
-    @db[:test2] << {:a=>2, :b=>3}
-    proc{@db[:test2] << {:a=>2, :b=>3}}.must_raise(Sequel::UniqueConstraintViolation, Sequel::ConstraintViolation, Sequel::DatabaseError)
+    @db[:test2].insert(:a=>1, :b=>2)
+    @db[:test2].insert(:a=>2, :b=>3)
+    proc{@db[:test2].insert(:a=>2, :b=>3)}.must_raise(Sequel::UniqueConstraintViolation, Sequel::ConstraintViolation, Sequel::DatabaseError)
   end
 
   it "should keep column attributes when dropping a column" do
@@ -497,9 +408,9 @@ describe "A SQLite database" do
 
     # This lame set of additions and deletions are to test that the primary keys
     # don't get messed up when we recreate the database.
-    @db[:test3] << { :name => "foo", :value => 1}
-    @db[:test3] << { :name => "foo", :value => 2}
-    @db[:test3] << { :name => "foo", :value => 3}
+    @db[:test3].insert( :name => "foo", :value => 1)
+    @db[:test3].insert( :name => "foo", :value => 2)
+    @db[:test3].insert( :name => "foo", :value => 3)
     @db[:test3].filter(:id => 2).delete
 
     @db.drop_column :test3, :value
@@ -508,38 +419,34 @@ describe "A SQLite database" do
     @db[:test3].select(:id).all.must_equal [{:id => 1}, {:id => 3}]
   end
 
-  if DB.foreign_keys
-    it "should keep foreign keys when dropping a column" do
-      @db.create_table! :test do
-        primary_key :id
-        String :name
-        Integer :value
-      end
-      @db.create_table! :test3 do
-        String :name
-        Integer :value
-        foreign_key :test_id, :test, :on_delete => :set_null, :on_update => :cascade
-      end
-
-      @db[:test3].insert(:name => "abc", :test_id => @db[:test].insert(:name => "foo", :value => 3))
-      @db[:test3].insert(:name => "def", :test_id => @db[:test].insert(:name => "bar", :value => 4))
-
-      @db.drop_column :test3, :value
-
-      @db[:test].filter(:name => 'bar').delete
-      @db[:test3][:name => 'def'][:test_id].must_equal nil
-
-      @db[:test].filter(:name => 'foo').update(:id=>100)
-      @db[:test3][:name => 'abc'][:test_id].must_equal 100
-
-      @db.drop_table? :test, :test3
+  it "should keep foreign keys when dropping a column" do
+    @db.create_table! :test do
+      primary_key :id
+      String :name
+      Integer :value
     end
+    @db.create_table! :test3 do
+      String :name
+      Integer :value
+      foreign_key :test_id, :test, :on_delete => :set_null, :on_update => :cascade
+    end
+
+    @db[:test3].insert(:name => "abc", :test_id => @db[:test].insert(:name => "foo", :value => 3))
+    @db[:test3].insert(:name => "def", :test_id => @db[:test].insert(:name => "bar", :value => 4))
+
+    @db.drop_column :test3, :value
+
+    @db[:test].filter(:name => 'bar').delete
+    @db[:test3][:name => 'def'][:test_id].must_be_nil
+
+    @db[:test].filter(:name => 'foo').update(:id=>100)
+    @db[:test3][:name => 'abc'][:test_id].must_equal 100
   end
 
   it "should support rename_column operations" do
     @db[:test2].delete
     @db.add_column :test2, :xyz, :text
-    @db[:test2] << {:name => 'mmm', :value => 111, :xyz => 'qqqq'}
+    @db[:test2].insert(:name => 'mmm', :value => 111, :xyz => 'qqqq')
 
     @db[:test2].columns.must_equal [:name, :value, :xyz]
     @db.rename_column :test2, :xyz, :zyx, :type => :text
@@ -566,9 +473,23 @@ describe "A SQLite database" do
     @db[:test3].first[:t].must_equal 'a'
     @db[:test3].delete
   end
+
+
+  it "should preserve autoincrement after table modification" do
+    @db.create_table!(:test2) do
+      primary_key :id
+      Integer :val, :null => false
+    end
+    @db.rename_column(:test2, :val, :value)
+
+    t = @db[:test2]
+    id1 = t.insert(:value=>1)
+    t.delete
+    id2 = t.insert(:value=>1)
+    id2.must_be :>, id1
+  end
   
   it "should handle quoted tables when dropping or renaming columns" do
-    @db.quote_identifiers = true
     table_name = "T T"
     @db.drop_table?(table_name)
     @db.create_table! table_name do
@@ -586,8 +507,6 @@ describe "A SQLite database" do
   end
   
   it "should choose a temporary table name that isn't already used when dropping or renaming columns" do
-    sqls = []
-    @db.loggers << (l=Class.new{%w'info error'.each{|m| define_method(m){|sql| sqls << sql}}}.new)
     @db.tables.each{|t| @db.drop_table(t) if t.to_s =~ /test3/}
     @db.create_table :test3 do
       Integer :h
@@ -603,10 +522,7 @@ describe "A SQLite database" do
     @db[:test3].columns.must_equal [:h, :i]
     @db[:test3_backup0].columns.must_equal [:j]
     @db[:test3_backup1].columns.must_equal [:k]
-    sqls.clear
     @db.drop_column(:test3, :i)
-    sqls.any?{|x| x =~ /\AALTER TABLE.*test3.*RENAME TO.*test3_backup2/}.must_equal true
-    sqls.any?{|x| x =~ /\AALTER TABLE.*test3.*RENAME TO.*test3_backup[01]/}.must_equal false
     @db[:test3].columns.must_equal [:h]
     @db[:test3_backup0].columns.must_equal [:j]
     @db[:test3_backup1].columns.must_equal [:k]
@@ -615,16 +531,11 @@ describe "A SQLite database" do
       Integer :l
     end
 
-    sqls.clear
     @db.rename_column(:test3, :h, :i)
-    sqls.any?{|x| x =~ /\AALTER TABLE.*test3.*RENAME TO.*test3_backup3/}.must_equal true
-    sqls.any?{|x| x =~ /\AALTER TABLE.*test3.*RENAME TO.*test3_backup[012]/}.must_equal false
     @db[:test3].columns.must_equal [:i]
     @db[:test3_backup0].columns.must_equal [:j]
     @db[:test3_backup1].columns.must_equal [:k]
     @db[:test3_backup2].columns.must_equal [:l]
-    @db.loggers.delete(l)
-    @db.drop_table?(:test3, :test3_backup0, :test3_backup1, :test3_backup2)
   end
   
   it "should support add_index" do
@@ -638,43 +549,26 @@ describe "A SQLite database" do
   end
 
   it "should keep applicable indexes when emulating schema methods" do
-    @db.create_table!(:a){Integer :a; Integer :b}
-    @db.add_index :a, :a
-    @db.add_index :a, :b
-    @db.add_index :a, [:b, :a]
-    @db.drop_column :a, :b
-    @db.indexes(:a).must_equal(:a_a_index=>{:unique=>false, :columns=>[:a]})
+    @db.create_table!(:test3){Integer :a; Integer :b}
+    @db.add_index :test3, :a
+    @db.add_index :test3, :b
+    @db.add_index :test3, [:b, :a]
+    @db.drop_column :test3, :b
+    @db.indexes(:test3)[:test3_a_index].must_equal(:unique=>false, :columns=>[:a])
   end
 
   it "should have support for various #transaction modes" do
-    sqls = []
-    @db.loggers << Class.new{%w'info error'.each{|m| define_method(m){|sql| sqls << sql}}}.new
+    @db.transaction(:mode => :immediate){}
+    @db.transaction(:mode => :exclusive){}
+    @db.transaction(:mode => :deferred){}
+    @db.transaction{}
 
-    @db.transaction(:mode => :immediate) do
-      sqls.last.must_equal "BEGIN IMMEDIATE TRANSACTION"
-    end
-    @db.transaction(:mode => :exclusive) do
-      sqls.last.must_equal "BEGIN EXCLUSIVE TRANSACTION"
-    end
-    @db.transaction(:mode => :deferred) do
-      sqls.last.must_equal "BEGIN DEFERRED TRANSACTION"
-    end
-    @db.transaction do
-      sqls.last.must_equal Sequel::Database::SQL_BEGIN
-    end
-
-    @db.transaction_mode.must_equal nil
+    @db.transaction_mode.must_be_nil
     @db.transaction_mode = :immediate
     @db.transaction_mode.must_equal :immediate
-    @db.transaction do
-      sqls.last.must_equal "BEGIN IMMEDIATE TRANSACTION"
-    end
-    @db.transaction(:mode => :exclusive) do
-      sqls.last.must_equal "BEGIN EXCLUSIVE TRANSACTION"
-    end
-
+    @db.transaction{}
+    @db.transaction(:mode => :exclusive){}
     proc {@db.transaction_mode = :invalid}.must_raise(Sequel::Error)
-
     @db.transaction_mode.must_equal :immediate
     proc {@db.transaction(:mode => :invalid) {}}.must_raise(Sequel::Error)
   end
@@ -685,4 +579,22 @@ describe "A SQLite database" do
     @db[:test2].insert(:name=>'a')
     proc{@db[:test2].insert(:name=>'a')}.must_raise(Sequel::ConstraintViolation, Sequel::UniqueConstraintViolation)
   end
+
+  it "should not ignore adding new constraints when adding not null constraints" do
+    @db.alter_table :test2 do
+      set_column_not_null :value
+      add_constraint(:value_range1, :value => 3..5)
+      add_constraint(:value_range2, :value => 0..9)
+    end
+
+    @db[:test2].insert(:value => 4)
+    proc{@db[:test2].insert(:value => 1)}.must_raise(Sequel::ConstraintViolation)
+    proc{@db[:test2].insert(:value => nil)}.must_raise(Sequel::ConstraintViolation)
+    @db[:test2].select_order_map(:value).must_equal [4]
+  end
+
+  it "should show unique constraints in Database#indexes" do
+    @db.alter_table(:test2){add_unique_constraint :name}
+    @db.indexes(:test2).values.first[:columns].must_equal [:name]
+  end if DB.sqlite_version >= 30808
 end

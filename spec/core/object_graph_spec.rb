@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
+require_relative "spec_helper"
 
 describe Sequel::Dataset, "graphing" do
   before do
@@ -59,6 +59,11 @@ describe Sequel::Dataset, "graphing" do
     end
 
     it "should requalify currently selected columns in new graph if current dataset joins tables" do
+      ds = @ds1.cross_join(:lines).select(Sequel[:points][:id], Sequel[:lines][:id].as(:lid), Sequel[:lines][:x], Sequel[:lines][:y]).graph(@ds3, :x=>:id)
+      ds.sql.must_equal 'SELECT points.id, points.lid, points.x, points.y, graphs.id AS graphs_id, graphs.name, graphs.x AS graphs_x, graphs.y AS graphs_y, graphs.lines_x FROM (SELECT points.id, lines.id AS lid, lines.x, lines.y FROM points CROSS JOIN lines) AS points LEFT OUTER JOIN graphs ON (graphs.x = points.id)'
+    end
+
+    with_symbol_splitting "should requalify currently selected columns in new graph if current dataset joins tables with splittable symbols" do
       ds = @ds1.cross_join(:lines).select(:points__id, :lines__id___lid, :lines__x, :lines__y).graph(@ds3, :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.lid, points.x, points.y, graphs.id AS graphs_id, graphs.name, graphs.x AS graphs_x, graphs.y AS graphs_y, graphs.lines_x FROM (SELECT points.id, lines.id AS lid, lines.x, lines.y FROM points CROSS JOIN lines) AS points LEFT OUTER JOIN graphs ON (graphs.x = points.id)'
     end
@@ -95,12 +100,17 @@ describe Sequel::Dataset, "graphing" do
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
 
-    it "should accept a schema qualified symbolic table name as the dataset" do
+    with_symbol_splitting "should accept a schema qualified symbolic table name as the dataset" do
       ds = @ds1.graph(:schema__lines, :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN schema.lines AS lines ON (lines.x = points.id)'
     end
 
-    it "allows giving table alias in symbolic argument" do
+    it "should accept a qualified identifier table name as the dataset" do
+      ds = @ds1.graph(Sequel[:schema][:lines], :x=>:id)
+      ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN schema.lines AS lines ON (lines.x = points.id)'
+    end
+
+    with_symbol_splitting "allows giving table alias in symbolic argument" do
       ds = @ds1.graph(:lines___sketch, :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, sketch.id AS sketch_id, sketch.x AS sketch_x, sketch.y AS sketch_y, sketch.graph_id FROM points LEFT OUTER JOIN lines AS sketch ON (sketch.x = points.id)'
       ds = @ds1.graph(:schema__lines___sketch, :x=>:id)
@@ -134,18 +144,24 @@ describe Sequel::Dataset, "graphing" do
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN schema.lines AS lines ON (lines.x = points.id)'
     end
 
-    it "should handle a qualified identifier as the source" do
+    with_symbol_splitting "should handle a qualified identifier symbol as the source" do
       ds = @ds1.from(:schema__points).graph(:lines, :x=>:id)
       ds.sql.must_equal 'SELECT schema.points.id, schema.points.x, schema.points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM schema.points LEFT OUTER JOIN lines ON (lines.x = schema.points.id)'
+    end
+
+    it "should handle a qualified identifier as the source" do
       ds = @ds1.from(Sequel.qualify(:schema, :points)).graph(:lines, :x=>:id)
       ds.sql.must_equal 'SELECT schema.points.id, schema.points.x, schema.points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM schema.points LEFT OUTER JOIN lines ON (lines.x = schema.points.id)'
+    end
+
+    with_symbol_splitting "should accept a SQL::AliasedExpression with splittable symbol as the dataset" do
+      ds = @ds1.graph(Sequel.as(:schema__lines, :foo), :x=>:id)
+      ds.sql.must_equal 'SELECT points.id, points.x, points.y, foo.id AS foo_id, foo.x AS foo_x, foo.y AS foo_y, foo.graph_id FROM points LEFT OUTER JOIN schema.lines AS foo ON (foo.x = points.id)'
     end
 
     it "should accept a SQL::AliasedExpression as the dataset" do
       ds = @ds1.graph(Sequel.as(:lines, :foo), :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, foo.id AS foo_id, foo.x AS foo_x, foo.y AS foo_y, foo.graph_id FROM points LEFT OUTER JOIN lines AS foo ON (foo.x = points.id)'
-      ds = @ds1.graph(Sequel.as(:schema__lines, :foo), :x=>:id)
-      ds.sql.must_equal 'SELECT points.id, points.x, points.y, foo.id AS foo_id, foo.x AS foo_x, foo.y AS foo_y, foo.graph_id FROM points LEFT OUTER JOIN schema.lines AS foo ON (foo.x = points.id)'
       ds = @ds1.graph(Sequel.as(Sequel.identifier(:lines), :foo), :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, foo.id AS foo_id, foo.x AS foo_x, foo.y AS foo_y, foo.graph_id FROM points LEFT OUTER JOIN lines AS foo ON (foo.x = points.id)'
       ds = @ds1.graph(Sequel.as(Sequel.qualify(:schema, :lines), :foo), :x=>:id)
@@ -196,11 +212,8 @@ describe Sequel::Dataset, "graphing" do
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN lines ON ((lines.x = points.id) AND (lines.y = points.id))'
     end
 
-    it "should not add columns if graph is called after set_graph_aliases" do
-      ds = @ds1.set_graph_aliases([[:x,[:points, :x]], [:y,[:lines, :y]]])
-      ds.sql.must_equal 'SELECT points.x, lines.y FROM points'
-      ds = ds.graph(:lines, :x=>:id)
-      ds.sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
+    it "should raise Error if set_graph_aliases is called on an ungraphed dataset" do
+      proc{@ds1.set_graph_aliases([[:x,[:points, :x]], [:y,[:lines, :y]]])}.must_raise Sequel::Error
     end
 
     it "should allow graphing of multiple datasets" do
@@ -209,6 +222,11 @@ describe Sequel::Dataset, "graphing" do
     end
 
     it "should allow graphing of the same dataset multiple times" do
+      ds = @ds1.graph(@ds2, :x=>:id).graph(@ds2, {:y=>Sequel[:points][:id]}, :table_alias=>:graph)
+      ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id, graph.id AS graph_id_0, graph.x AS graph_x, graph.y AS graph_y, graph.graph_id AS graph_graph_id FROM points LEFT OUTER JOIN lines ON (lines.x = points.id) LEFT OUTER JOIN lines AS graph ON (graph.y = points.id)'
+    end
+
+    with_symbol_splitting "should allow graphing of the same dataset multiple times when using splittable symbols" do
       ds = @ds1.graph(@ds2, :x=>:id).graph(@ds2, {:y=>:points__id}, :table_alias=>:graph)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id, graph.id AS graph_id_0, graph.x AS graph_x, graph.y AS graph_y, graph.graph_id AS graph_graph_id FROM points LEFT OUTER JOIN lines ON (lines.x = points.id) LEFT OUTER JOIN lines AS graph ON (graph.y = points.id)'
     end
@@ -225,7 +243,7 @@ describe Sequel::Dataset, "graphing" do
     it "should not modify the current dataset's opts" do
       o1 = @ds1.opts
       o2 = o1.dup
-      ds1 = @ds1.set_graph_aliases(:x=>[:graphs,:id])
+      ds1 = @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:graphs,:id])
       @ds1.opts.must_equal o1
       @ds1.opts.must_equal o2
       ds1.opts.wont_equal o1
@@ -234,49 +252,34 @@ describe Sequel::Dataset, "graphing" do
     it "should specify the graph mapping" do
       ds = @ds1.graph(:lines, :x=>:id)
       ds.sql.must_equal 'SELECT points.id, points.x, points.y, lines.id AS lines_id, lines.x AS lines_x, lines.y AS lines_y, lines.graph_id FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
-      ds = ds.set_graph_aliases(:x=>[:points, :x], :y=>[:lines, :y])
-      ['SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)',
-      'SELECT lines.y, points.x FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
-      ].must_include(ds.sql)
+      ds.set_graph_aliases(:x=>[:points, :x], :y=>[:lines, :y]).sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
 
     it "should allow a third entry to specify an expression to use other than the default" do
-      ds = @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points, :x, 1], :y=>[:lines, :y, Sequel.function(:random)])
-      ['SELECT 1 AS x, random() AS y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)',
-      'SELECT random() AS y, 1 AS x FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
-      ].must_include(ds.sql)
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points, :x, 1], :y=>[:lines, :y, Sequel.function(:random)]).sql.must_equal 'SELECT 1 AS x, random() AS y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
 
     it "should allow a single array entry to specify a table, assuming the same column as the key" do
-      ds = @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points], :y=>[:lines])
-      ['SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)',
-      'SELECT lines.y, points.x FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
-      ].must_include(ds.sql)
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points], :y=>[:lines]).sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
 
     it "should allow hash values to be symbols specifying table, assuming the same column as the key" do
-      ds = @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>:points, :y=>:lines)
-      ['SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)',
-      'SELECT lines.y, points.x FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
-      ].must_include(ds.sql)
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>:points, :y=>:lines).sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
 
     it "should only alias columns if necessary" do
-      ds = @ds1.set_graph_aliases(:x=>[:points, :x], :y=>[:lines, :y])
-      ['SELECT points.x, lines.y FROM points',
-      'SELECT lines.y, points.x FROM points'
-      ].must_include(ds.sql)
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points, :x], :y=>[:lines, :y]).sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
+    end
 
-      ds = @ds1.set_graph_aliases(:x1=>[:points, :x], :y=>[:lines, :y])
-      ['SELECT points.x AS x1, lines.y FROM points',
-      'SELECT lines.y, points.x AS x1 FROM points'
-      ].must_include(ds.sql)
+    it "should only alias columns if necessary" do
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:points, :x], :y=>[:lines, :y]).sql.must_equal 'SELECT points.x, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
+      @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x1=>[:points, :x], :y=>[:lines, :y]).sql.must_equal 'SELECT points.x AS x1, lines.y FROM points LEFT OUTER JOIN lines ON (lines.x = points.id)'
     end
   end
 
   describe "#add_graph_aliases" do
     it "should not modify the current dataset's opts" do
-      ds1 = @ds1.set_graph_aliases(:x=>[:graphs,:id])
+      ds1 = @ds1.graph(:lines, :x=>:id).set_graph_aliases(:x=>[:graphs,:id])
       o1 = ds1.opts
       o2 = o1.dup
       ds2 = ds1.add_graph_aliases(:y=>[:blah,:id])

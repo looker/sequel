@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::InputTransformer" do
   before do
@@ -13,6 +13,12 @@ describe "Sequel::Plugins::InputTransformer" do
     @o.name.must_equal ' eman '
     @o.name = [1, 2, 3]
     @o.name.must_equal [1, 2, 3]
+  end
+
+  it "should have working .input_transformer_order" do
+    @c.input_transformer_order.must_equal [:reverser]
+    @c.plugin(:input_transformer, :reverser2){|v| v.is_a?(String) ? v.reverse : v}
+    @c.input_transformer_order.must_equal [:reverser2, :reverser]
   end
 
   it "should not apply any transformers by default" do
@@ -50,5 +56,14 @@ describe "Sequel::Plugins::InputTransformer" do
     @c.add_input_transformer(:add_foo){|v| v << 'foo'}
     @o.name = ' name '.dup
     @o.name.must_equal 'raboof eman '
+  end
+
+  it "should freeze input transformers when freezing model class" do
+    @c.skip_input_transformer :reverser, :name
+    @c.freeze
+    @c.input_transformers.frozen?.must_equal true
+    skip = @c.instance_variable_get(:@skip_input_transformer_columns)
+    skip.frozen?.must_equal true
+    skip.values.all?(&:frozen?).must_equal true
   end
 end

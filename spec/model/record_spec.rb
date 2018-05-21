@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Model#values" do
   before do
@@ -33,7 +33,7 @@ end
 
 describe "Model#save server use" do
   before do
-    @db = Sequel.mock(:autoid=>proc{|sql| 10}, :fetch=>{:x=>1, :id=>10}, :servers=>{:blah=>{}, :read_only=>{}})
+    @db = Sequel.mock(:autoid=>proc{|sql| 10}, :fetch=>{:x=>1, :id=>10}, :numrows=>1, :servers=>{:blah=>{}, :read_only=>{}})
     @c = Class.new(Sequel::Model(@db[:items]))
     @c.columns :id, :x, :y
     @c.dataset.columns(:id, :x, :y)
@@ -50,6 +50,19 @@ describe "Model#save server use" do
     @c.new(:x=>1).save.must_equal @c.load(:x=>1, :id=>10)
     @db.sqls.must_equal ["INSERT INTO items (x) VALUES (1) -- blah", 'SELECT * FROM items WHERE (id = 10) LIMIT 1 -- blah']
   end
+
+  it "should use transactions on the correct server"  do
+    @c.use_transactions = true
+    @c.dataset = @c.dataset.server(:blah)
+    @c.new(:x=>1).save.must_equal @c.load(:x=>1, :id=>10)
+    @db.sqls.must_equal ["BEGIN -- blah", "INSERT INTO items (x) VALUES (1) -- blah", 'SELECT * FROM items WHERE (id = 10) LIMIT 1 -- blah', 'COMMIT -- blah']
+
+    o = @c.load(:id=>1)
+    o.x = 2
+    o.this
+    o.save
+    @db.sqls.must_equal ["BEGIN -- blah", "UPDATE items SET x = 2 WHERE (id = 1) -- blah", 'COMMIT -- blah']
+  end
 end
 
 describe "Model#save" do
@@ -57,28 +70,28 @@ describe "Model#save" do
     @c = Class.new(Sequel::Model(:items)) do
       columns :id, :x, :y
     end
-    @c.instance_dataset.autoid = @c.dataset.autoid = 13
+    @c.dataset = @c.dataset.with_autoid(13)
     DB.reset
   end
   
   it "should insert a record for a new model instance" do
     o = @c.new(:x => 1)
     o.save
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 13) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE id = 13"]
   end
 
   it "should raise if the object can't be refreshed after save" do
     o = @c.new(:x => 1)
-    @c.instance_dataset._fetch =@c.dataset._fetch = []
+    @c.dataset = @c.dataset.with_fetch([])
     proc{o.save}.must_raise(Sequel::NoExistingObject)
   end
 
   it "should use dataset's insert_select method if present" do
-    ds = @c.instance_dataset
-    ds._fetch = {:y=>2}
-    def ds.supports_insert_select?() true end
-    def ds.insert_select(hash)
-      with_sql_first("INSERT INTO items (y) VALUES (2) RETURNING *")
+    @c.dataset = @c.dataset.with_fetch(:y=>2).with_extend do
+      def supports_insert_select?; true end
+      def insert_select(hash)
+        with_sql_first("INSERT INTO items (y) VALUES (2) RETURNING *")
+      end
     end
     o = @c.new(:x => 1)
     o.save
@@ -87,22 +100,48 @@ describe "Model#save" do
     DB.sqls.must_equal ["INSERT INTO items (y) VALUES (2) RETURNING *"]
   end
 
+  it "should issue regular insert query if insert_select returns nil" do
+    @c.dataset = @c.dataset.with_fetch(:id=>4, :x=>2).with_autoid(4).with_extend do
+      def supports_insert_select?; true end
+      def insert_select(hash)
+      end
+    end
+    o = @c.new(:x => 1)
+    o.save
+    
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE id = 4"]
+    o.values.must_equal(:id=>4, :x=>2)
+  end
+
+  it "should assume insert statement already ran if insert_select returns false" do
+    @c.dataset = @c.dataset.with_fetch(:y=>2).with_extend do
+      def supports_insert_select?; true end
+      def insert_select(hash)
+        with_sql_first("INSERT INTO items (y) VALUES (2) RETURNING *")
+        false
+      end
+    end
+    o = @c.new(:x => 1)
+    o.save
+    
+    o.values.must_equal(:x=>1)
+    DB.sqls.must_equal ["INSERT INTO items (y) VALUES (2) RETURNING *"]
+  end
+
   it "should not use dataset's insert_select method if specific columns are selected" do
-    ds = @c.dataset = @c.dataset.select(:y)
-    def ds.insert_select(*) raise; end
+    @c.dataset = @c.dataset.select(:y).with_extend{def insert_select(*) raise; end}
     @c.new(:x => 1).save
   end
 
   it "should use dataset's insert_select method if the dataset uses returning, even if specific columns are selected" do
-    def (@c.dataset).supports_returning?(_) true end
-    ds = @c.dataset = @c.dataset.select(:y).returning(:y)
+    @c.dataset = @c.dataset.select(:y).with_fetch(:y=>2).with_extend do
+      def supports_returning?(_) true end
+      def supports_insert_select?; true end
+      def insert_select(hash)
+        with_sql_first("INSERT INTO items (y) VALUES (2) RETURNING y")
+      end
+    end.returning(:y)
     DB.reset
-    ds = @c.instance_dataset
-    ds._fetch = {:y=>2}
-    def ds.supports_insert_select?() true end
-    def ds.insert_select(hash)
-      with_sql_first("INSERT INTO items (y) VALUES (2) RETURNING y")
-    end
     o = @c.new(:x => 1)
     o.save
     
@@ -113,8 +152,7 @@ describe "Model#save" do
   it "should use value returned by insert as the primary key and refresh the object" do
     o = @c.new(:x => 11)
     o.save
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (11)",
-      "SELECT * FROM items WHERE (id = 13) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (11)", "SELECT * FROM items WHERE id = 13"]
   end
 
   it "should allow you to skip refreshing by overridding _save_refresh" do
@@ -136,10 +174,8 @@ describe "Model#save" do
     o = @c.new(:x => 11)
     def o.autoincrementing_primary_key() :y end
     o.save
-    sqls = DB.sqls
-    sqls.length.must_equal 2
-    sqls.first.must_equal "INSERT INTO items (x) VALUES (11)"
-    sqls.last.must_match %r{SELECT \* FROM items WHERE \(\([xy] = 1[13]\) AND \([xy] = 1[13]\)\) LIMIT 1}
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (11)",
+      'SELECT * FROM items WHERE ((x = 11) AND (y = 13)) LIMIT 1']
   end
 
   it "should update a record for an existing model instance" do
@@ -149,19 +185,19 @@ describe "Model#save" do
   end
   
   it "should raise a NoExistingObject exception if the dataset update call doesn't return 1, unless require_modification is false" do
+    i = 0
+    @c.dataset = @c.dataset.with_extend{define_method(:numrows){i}}
     o = @c.load(:id => 3, :x => 1)
-    t = o.this
-    t.numrows = 0
     proc{o.save}.must_raise(Sequel::NoExistingObject)
-    t.numrows = 2
+    i = 2
     proc{o.save}.must_raise(Sequel::NoExistingObject)
-    t.numrows = 1
+    i = 1
     o.save
     
     o.require_modification = false
-    t.numrows = 0
+    i = 0
     o.save
-    t.numrows = 2
+    i = 2
     o.save
   end
   
@@ -190,7 +226,7 @@ describe "Model#save" do
   end
   
   it "should mark all columns as not changed if this is a new record and insert_select was used" do
-    def (@c.dataset).insert_select(h) h.merge(:id=>1) end
+    @c.dataset = @c.dataset.with_extend{def insert_select(h) h.merge(:id=>1) end}
     o = @c.new(:x => 1, :y => nil)
     o.x = 4
     o.changed_columns.must_equal [:x]
@@ -198,34 +234,6 @@ describe "Model#save" do
     o.changed_columns.must_equal []
   end
 
-  it "should store previous value of @new in @was_new and as well as the hash used for updating in @columns_updated until after hooks finish running" do
-    res = nil
-    @c.send(:define_method, :after_save){ res = [@columns_updated, @was_new]}
-    o = @c.new(:x => 1, :y => nil)
-    o[:x] = 2
-    o.save
-    res.must_equal [nil, true]
-    o.after_save
-    res.must_equal [nil, nil]
-
-    res = nil
-    o = @c.load(:id => 23,:x => 1, :y => nil)
-    o[:x] = 2
-    o.save
-    res.must_equal [{:x => 2, :y => nil}, nil]
-    o.after_save
-    res.must_equal [nil, nil]
-
-    res = nil
-    o = @c.load(:id => 23,:x => 2, :y => nil)
-    o[:x] = 2
-    o[:y] = 22
-    o.save(:columns=>:x)
-    res.must_equal [{:x=>2},nil]
-    o.after_save
-    res.must_equal [nil, nil]
-  end
-  
   it "should use Model's use_transactions setting by default" do
     @c.use_transactions = true
     @c.load(:id => 3, :x => 1, :y => nil).save(:columns=>:y)
@@ -268,17 +276,6 @@ describe "Model#save" do
     DB.sqls.must_equal ["BEGIN", "UPDATE items SET y = NULL WHERE (id = 3)", "COMMIT"]
   end
 
-  it "should rollback if before_save returns false and raise_on_save_failure = true" do
-    o = @c.load(:id => 3, :x => 1, :y => nil)
-    o.use_transactions = true
-    o.raise_on_save_failure = true
-    def o.before_save
-      false
-    end
-    proc { o.save(:columns=>:y) }.must_raise(Sequel::HookFailed)
-    DB.sqls.must_equal ["BEGIN", "ROLLBACK"]
-  end
-
   it "should rollback if before_save calls cancel_action and raise_on_save_failure = true" do
     o = @c.load(:id => 3, :x => 1, :y => nil)
     o.use_transactions = true
@@ -290,39 +287,39 @@ describe "Model#save" do
     DB.sqls.must_equal ["BEGIN", "ROLLBACK"]
   end
 
-  it "should rollback if before_save returns false and :raise_on_failure option is true" do
+  it "should rollback if before_save calls cancel_action and :raise_on_failure option is true" do
     o = @c.load(:id => 3, :x => 1, :y => nil)
     o.use_transactions = true
     o.raise_on_save_failure = false
     def o.before_save
-      false
+      cancel_action
     end
     proc { o.save(:columns=>:y, :raise_on_failure => true) }.must_raise(Sequel::HookFailed)
     DB.sqls.must_equal ["BEGIN", "ROLLBACK"]
   end
 
-  it "should not rollback outer transactions if before_save returns false and raise_on_save_failure = false" do
+  it "should not rollback outer transactions if before_save calls cancel_action and raise_on_save_failure = false" do
     o = @c.load(:id => 3, :x => 1, :y => nil)
     o.use_transactions = true
     o.raise_on_save_failure = false
     def o.before_save
-      false
+      cancel_action
     end
     DB.transaction do
-      o.save(:columns=>:y).must_equal nil
+      o.save(:columns=>:y).must_be_nil
       DB.run "BLAH"
     end
     DB.sqls.must_equal ["BEGIN", "BLAH", "COMMIT"]
   end
 
-  it "should rollback if before_save returns false and raise_on_save_failure = false" do
+  it "should rollback if before_save calls cancel_action and raise_on_save_failure = false" do
     o = @c.load(:id => 3, :x => 1, :y => nil)
     o.use_transactions = true
     o.raise_on_save_failure = false
     def o.before_save
-      false
+      cancel_action
     end
-    o.save(:columns=>:y).must_equal nil
+    o.save(:columns=>:y).must_be_nil
     DB.sqls.must_equal ["BEGIN", "ROLLBACK"]
   end
 
@@ -436,7 +433,7 @@ describe "Model#freeze" do
   end
 
   it "should still have working class attr overriddable methods" do
-    Sequel::Model::BOOLEAN_SETTINGS.each{|m| @o.send(m) == Album.send(m)}
+    [:typecast_empty_string_to_nil, :typecast_on_assignment, :strict_param_setting, :raise_on_save_failure, :raise_on_typecast_failure, :require_modification, :use_transactions].each{|m| @o.send(m) == Album.send(m)}
   end
 
   it "should have working new? method" do
@@ -499,11 +496,13 @@ describe "Model#dup" do
   end
 
   it "should not copy frozen status" do
-    @o.freeze.dup.wont_be :frozen?
-    @o.freeze.dup.values.wont_be :frozen?
-    @o.freeze.dup.changed_columns.wont_be :frozen?
-    @o.freeze.dup.errors.wont_be :frozen?
-    @o.freeze.dup.this.wont_be :frozen?
+    this_frozen = @o.this.frozen?
+    d = @o.freeze.dup
+    d.wont_be :frozen?
+    d.values.wont_be :frozen?
+    d.changed_columns.wont_be :frozen?
+    d.errors.wont_be :frozen?
+    d.this.frozen?.must_equal this_frozen
   end
 end
 
@@ -684,12 +683,14 @@ describe "Model#save_changes" do
   end
 
   it "should take options passed to save" do
-    o = @c.new(:x => 1)
-    def o.before_validation; false; end
-    proc{o.save_changes}.must_raise(Sequel::HookFailed)
-    DB.sqls.must_equal []
-    o.save_changes(:validate=>false)
-    DB.sqls.first.must_equal "INSERT INTO items (x) VALUES (1)"
+    o = @c.load(:id=>1, :x => 1)
+    o.x = 2
+    o.save_changes
+    DB.sqls.must_equal ["UPDATE items SET x = 2 WHERE (id = 1)"]
+
+    o.x = 3
+    o.save_changes(:transaction=>true)
+    DB.sqls.must_equal ["BEGIN", "UPDATE items SET x = 3 WHERE (id = 1)", "COMMIT"]
   end
 
   it "should do nothing if no changed columns" do
@@ -820,7 +821,7 @@ end
 
 describe Sequel::Model, "without a primary key" do
   it "should return nil for primary key" do
-    Class.new(Sequel::Model){no_primary_key}.primary_key.must_equal nil
+    Class.new(Sequel::Model){no_primary_key}.primary_key.must_be_nil
   end
 
   it "should raise a Sequel::Error on 'this'" do
@@ -847,16 +848,22 @@ describe Sequel::Model, "#this" do
     instance.this.sql.must_equal "SELECT * FROM examples WHERE (a = 3) LIMIT 1"
   end
 
-  it "should use a qualified primary key if the dataset is joined" do
+  it "should use a subquery if the dataset is joined" do
     @example.dataset = @example.dataset.cross_join(:a)
     instance = @example.load(:id => 3)
-    instance.this.sql.must_equal "SELECT * FROM examples CROSS JOIN a WHERE (examples.id = 3) LIMIT 1"
+    instance.this.sql.must_equal "SELECT * FROM (SELECT * FROM examples CROSS JOIN a) AS examples WHERE (id = 3) LIMIT 1"
+  end
+
+  it "should use a primary key if the dataset uses a subquery" do
+    @example.dataset = @example.dataset.cross_join(:a).from_self(:alias=>:b)
+    instance = @example.load(:id => 3)
+    instance.this.sql.must_equal "SELECT * FROM (SELECT * FROM examples CROSS JOIN a) AS b WHERE (id = 3) LIMIT 1"
   end
 
   it "should support composite primary keys" do
     @example.set_primary_key [:x, :y]
     instance = @example.load(:x => 4, :y => 5)
-    instance.this.sql.must_match(/SELECT \* FROM examples WHERE \(\([xy] = [45]\) AND \([xy] = [45]\)\) LIMIT 1/)
+    instance.this.sql.must_equal 'SELECT * FROM examples WHERE ((x = 4) AND (y = 5)) LIMIT 1'
   end
 end
 
@@ -1036,7 +1043,7 @@ describe Sequel::Model, "#set" do
 
   it "should raise error if strict_param_setting is true and column is restricted" do
     @o1.strict_param_setting = true
-    @c.set_allowed_columns
+    @c.setter_methods.delete("x=")
     proc{@o1.set('x' => 1)}.must_raise(Sequel::MassAssignmentRestriction)
   end
 
@@ -1111,7 +1118,7 @@ describe Sequel::Model, "#update" do
   
   it "should filter the given params using the model columns" do
     @o1.update(:x => 1, :z => 2)
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE id = 10"]
 
     DB.reset
     @o2.update(:y => 1, :abc => 2)
@@ -1121,12 +1128,12 @@ describe Sequel::Model, "#update" do
   it "should support virtual attributes" do
     @c.send(:define_method, :blah=){|v| self.x = v}
     @o1.update(:blah => 333)
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (333)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (333)", "SELECT * FROM items WHERE id = 10"]
   end
   
   it "should not modify the primary key" do
     @o1.update(:x => 1, :id => 2)
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE id = 10"]
     DB.reset
     @o2.update('y'=> 1, 'id'=> 2)
     @o2.values.must_equal(:y => 1, :id=> 5)
@@ -1242,9 +1249,7 @@ describe Sequel::Model, "#update_fields" do
   it "should set only the given fields, and then save the changes to the record" do
     @o1.update_fields({:x => 1, :y => 2, :z=>3, :id=>4}, [:x, :y])
     @o1.values.must_equal(:x => 1, :y => 2, :id=>1)
-    sqls = DB.sqls
-    sqls.pop.must_match(/UPDATE items SET [xy] = [12], [xy] = [12] WHERE \(id = 1\)/)
-    sqls.must_equal []
+    DB.sqls.must_equal ['UPDATE items SET x = 1, y = 2 WHERE (id = 1)']
 
     @o1.update_fields({:x => 1, :y => 5, :z=>6, :id=>7}, [:x, :y])
     @o1.values.must_equal(:x => 1, :y => 5, :id=>1)
@@ -1273,68 +1278,6 @@ describe Sequel::Model, "#update_fields" do
   end
 end
 
-describe Sequel::Model, "#(set|update)_(all|only)" do
-  before do
-    @c = Class.new(Sequel::Model(:items)) do
-      set_primary_key :id
-      columns :x, :y, :z, :id
-      set_allowed_columns :x
-    end
-    @c.strict_param_setting = false
-    @o1 = @c.new
-    DB.reset
-  end
-
-  it "should raise errors if not all hash fields can be set and strict_param_setting is true" do
-    @c.strict_param_setting = true
-
-    proc{@c.new.set_all(:x => 1, :y => 2, :z=>3, :use_after_commit_rollback => false)}.must_raise(Sequel::MassAssignmentRestriction)
-    (o = @c.new).set_all(:x => 1, :y => 2, :z=>3)
-    o.values.must_equal(:x => 1, :y => 2, :z=>3)
-
-    proc{@c.new.set_only({:x => 1, :y => 2, :z=>3, :id=>4}, :x, :y)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{@c.new.set_only({:x => 1, :y => 2, :z=>3}, :x, :y)}.must_raise(Sequel::MassAssignmentRestriction)
-    (o = @c.new).set_only({:x => 1, :y => 2}, :x, :y)
-    o.values.must_equal(:x => 1, :y => 2)
-  end
-
-  it "#set_all should set all attributes including the primary key" do
-    @o1.set_all(:x => 1, :y => 2, :z=>3, :id=>4)
-    @o1.values.must_equal(:id =>4, :x => 1, :y => 2, :z=>3)
-  end
-
-  it "#set_all should set not set restricted fields" do
-    @o1.set_all(:x => 1, :use_after_commit_rollback => false)
-    @o1.use_after_commit_rollback.must_equal true
-    @o1.values.must_equal(:x => 1)
-  end
-
-  it "#set_only should only set given attributes" do
-    @o1.set_only({:x => 1, :y => 2, :z=>3, :id=>4}, [:x, :y])
-    @o1.values.must_equal(:x => 1, :y => 2)
-    @o1.set_only({:x => 4, :y => 5, :z=>6, :id=>7}, :x, :y)
-    @o1.values.must_equal(:x => 4, :y => 5)
-    @o1.set_only({:x => 9, :y => 8, :z=>6, :id=>7}, :x, :y, :id)
-    @o1.values.must_equal(:x => 9, :y => 8, :id=>7)
-  end
-
-  it "#update_all should update all attributes" do
-    @c.new.update_all(:x => 1)
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
-    @c.new.update_all(:y => 1)
-    DB.sqls.must_equal ["INSERT INTO items (y) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
-    @c.new.update_all(:z => 1)
-    DB.sqls.must_equal ["INSERT INTO items (z) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
-  end
-
-  it "#update_only should only update given attributes" do
-    @o1.update_only({:x => 1, :y => 2, :z=>3, :id=>4}, [:x])
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
-    @c.new.update_only({:x => 1, :y => 2, :z=>3, :id=>4}, :x)
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (1)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
-  end
-end
-
 describe Sequel::Model, "#destroy with filtered dataset" do
   before do
     @model = Class.new(Sequel::Model(DB[:items].where(:a=>1)))
@@ -1344,17 +1287,18 @@ describe Sequel::Model, "#destroy with filtered dataset" do
   end
 
   it "should raise a NoExistingObject exception if the dataset delete call doesn't return 1" do
-    def (@instance.this).execute_dui(*a) 0 end
+    i = 0
+    @model.dataset = @model.dataset.with_extend{define_method(:execute_dui){|*| i}}
     proc{@instance.delete}.must_raise(Sequel::NoExistingObject)
-    def (@instance.this).execute_dui(*a) 2 end
+    i = 2
     proc{@instance.delete}.must_raise(Sequel::NoExistingObject)
-    def (@instance.this).execute_dui(*a) 1 end
+    i = 1
     @instance.delete
     
     @instance.require_modification = false
-    def (@instance.this).execute_dui(*a) 0 end
+    i = 0
     @instance.delete
-    def (@instance.this).execute_dui(*a) 2 end
+    i = 2
     @instance.delete
   end
 
@@ -1378,17 +1322,18 @@ describe Sequel::Model, "#destroy" do
   end
   
   it "should raise a NoExistingObject exception if the dataset delete call doesn't return 1" do
-    def (@model.dataset).execute_dui(*a) 0 end
+    i = 0
+    @model.dataset = @model.dataset.with_extend{define_method(:execute_dui){|*| i}}
     proc{@instance.delete}.must_raise(Sequel::NoExistingObject)
-    def (@model.dataset).execute_dui(*a) 2 end
+    i = 2
     proc{@instance.delete}.must_raise(Sequel::NoExistingObject)
-    def (@model.dataset).execute_dui(*a) 1 end
+    i = 1
     @instance.delete
     
     @instance.require_modification = false
-    def (@model.dataset).execute_dui(*a) 0 end
+    i = 0
     @instance.delete
-    def (@model.dataset).execute_dui(*a) 2 end
+    i = 2
     @instance.delete
   end
 
@@ -1427,7 +1372,7 @@ end
 describe Sequel::Model, "#exists?" do
   before do
     @model = Class.new(Sequel::Model(:items))
-    @model.instance_dataset._fetch = @model.dataset._fetch = proc{|sql| {:x=>1} if sql =~ /id = 1/}
+    @model.dataset = @model.dataset.with_fetch(proc{|sql| {:x=>1} if sql =~ /id = 1/})
     DB.reset
   end
 
@@ -1696,13 +1641,13 @@ describe Sequel::Model, ".create" do
   it "should be able to create rows in the associated table" do
     o = @c.create(:x => 1)
     o.class.must_equal @c
-    DB.sqls.must_equal ['INSERT INTO items (x) VALUES (1)', "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ['INSERT INTO items (x) VALUES (1)', "SELECT * FROM items WHERE id = 10"]
   end
 
   it "should be able to create rows without any values specified" do
     o = @c.create
     o.class.must_equal @c
-    DB.sqls.must_equal ["INSERT INTO items DEFAULT VALUES", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items DEFAULT VALUES", "SELECT * FROM items WHERE id = 10"]
   end
 
   it "should accept a block and call it" do
@@ -1712,14 +1657,14 @@ describe Sequel::Model, ".create" do
     o1.must_be :===, o
     o3.must_be :===, o
     o2.must_equal :blah
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (333)", "SELECT * FROM items WHERE (id = 10) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (333)", "SELECT * FROM items WHERE id = 10"]
   end
   
   it "should create a row for a model with custom primary key" do
     @c.set_primary_key :x
     o = @c.create(:x => 30)
     o.class.must_equal @c
-    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (30)", "SELECT * FROM items WHERE (x = 30) LIMIT 1"]
+    DB.sqls.must_equal ["INSERT INTO items (x) VALUES (30)", "SELECT * FROM items WHERE x = 30"]
   end
 end
 
@@ -1735,25 +1680,25 @@ describe Sequel::Model, "#refresh" do
   it "should reload the instance values from the database" do
     @m = @c.new(:id => 555)
     @m[:x] = 'blah'
-    @c.instance_dataset._fetch = @c.dataset._fetch = {:x => 'kaboom', :id => 555}
+    @c.dataset = @c.dataset.with_fetch(:x => 'kaboom', :id => 555)
     @m.refresh
     @m[:x].must_equal 'kaboom'
-    DB.sqls.must_equal ["SELECT * FROM items WHERE (id = 555) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM items WHERE id = 555"]
   end
   
   it "should raise if the instance is not found" do
     @m = @c.new(:id => 555)
-    @c.instance_dataset._fetch =@c.dataset._fetch = []
+    @c.dataset = @c.dataset.with_fetch([])
     proc {@m.refresh}.must_raise(Sequel::NoExistingObject)
-    DB.sqls.must_equal ["SELECT * FROM items WHERE (id = 555) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM items WHERE id = 555"]
   end
   
   it "should be aliased by #reload" do
     @m = @c.new(:id => 555)
-    @c.instance_dataset._fetch =@c.dataset._fetch = {:x => 'kaboom', :id => 555}
+    @c.dataset = @c.dataset.with_fetch(:x => 'kaboom', :id => 555)
     @m.reload
     @m[:x].must_equal 'kaboom'
-    DB.sqls.must_equal ["SELECT * FROM items WHERE (id = 555) LIMIT 1"]
+    DB.sqls.must_equal ["SELECT * FROM items WHERE id = 555"]
   end
 end
 
@@ -1794,7 +1739,7 @@ describe Sequel::Model, "typecasting" do
       @c.db_schema = {:x=>{:type=>x}}
       m = @c.new
       m.x = ''
-      m.x.must_equal nil
+      m.x.must_be_nil
     end
    [:string, :blob].each do |x|
       @c.db_schema = {:x=>{:type=>x}}
@@ -1825,7 +1770,7 @@ describe Sequel::Model, "typecasting" do
     @c.db_schema[:x][:allow_null] = true
     m = @c.new
     m.x = nil
-    m.x.must_equal nil
+    m.x.must_be_nil
   end
 
   it "should raise an error if attempting to typecast nil and NULLs are not allowed" do
@@ -1839,7 +1784,7 @@ describe Sequel::Model, "typecasting" do
     @c.db_schema[:x][:allow_null] = false
     m = @c.new
     m.x = nil
-    m.x.must_equal nil
+    m.x.must_be_nil
   end
 
   it "should not raise when typecasting nil to NOT NULL column but raise_on_typecast_failure is off" do
@@ -1847,9 +1792,9 @@ describe Sequel::Model, "typecasting" do
     @c.typecast_on_assignment = true
     m = @c.new
     m.x = ''
-    m.x.must_equal nil
+    m.x.must_be_nil
     m.x = nil
-    m.x.must_equal nil
+    m.x.must_be_nil
   end
 
   it "should raise an error if invalid data is used in an integer field" do
@@ -1949,11 +1894,11 @@ describe Sequel::Model, "typecasting" do
     m.x = true
     m.x.must_equal true
     m.x = nil
-    m.x.must_equal nil
+    m.x.must_be_nil
     m.x = ''
-    m.x.must_equal nil
+    m.x.must_be_nil
     m.x = []
-    m.x.must_equal nil
+    m.x.must_be_nil
     m.x = 'f'
     m.x.must_equal false
     m.x = 'F'
@@ -2122,7 +2067,7 @@ describe "Model#lock!" do
     @c = Class.new(Sequel::Model(:items)) do
       columns :id
     end
-    @c.dataset._fetch = {:id=>1}
+    @c.dataset = @c.dataset.with_fetch(:id=>1)
     DB.reset
   end
   

@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 Sequel.extension :pg_array, :pg_json
 
@@ -12,8 +12,21 @@ describe "pg_json extension" do
     @bac = m::JSONBArray
   end
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:pg_array, :pg_json)
+  end
+
+  it "should set up conversion procs correctly" do
+    cp = @db.conversion_procs
+    cp[114].call("{}").must_equal @hc.new({})
+    cp[3802].call("{}").must_equal @bhc.new({})
+  end
+
+  it "should set up conversion procs for arrays correctly" do
+    cp = @db.conversion_procs
+    cp[199].call("{[]}").must_equal [@ac.new([])]
+    cp[3807].call("{[]}").must_equal [@bac.new([])]
   end
 
   it "should parse json strings correctly" do
@@ -47,21 +60,23 @@ describe "pg_json extension" do
 
   it "should raise an error when attempting to parse invalid json" do
     proc{@m.parse_json('')}.must_raise(Sequel::InvalidValue)
-    proc{@m.parse_json('1')}.must_raise(Sequel::InvalidValue)
+    proc{@m.parse_json('a')}.must_raise(Sequel::InvalidValue)
 
     begin
       Sequel.instance_eval do
         alias pj parse_json
         def parse_json(v)
-          {'1'=>1, "'a'"=>'a', 'true'=>true, 'false'=>false, 'null'=>nil, 'o'=>Object.new}.fetch(v){pj(v)}
+          {'1'=>1, "'a'"=>'a', 'true'=>true, 'false'=>false, 'null'=>nil, 'o'=>Object.new, '[one]'=>[1]}.fetch(v){pj(v)}
         end
       end
       @m.parse_json('1').must_equal 1
       @m.parse_json("'a'").must_equal 'a'
       @m.parse_json('true').must_equal true
       @m.parse_json('false').must_equal false
-      @m.parse_json('null').must_equal nil
+      @m.parse_json('null').must_be_nil
       proc{@m.parse_json('o')}.must_raise(Sequel::InvalidValue)
+      @m.db_parse_json('one').must_equal 1
+      @m.db_parse_jsonb('one').must_equal 1
     ensure
       Sequel.instance_eval do
         alias parse_json pj
@@ -76,7 +91,7 @@ describe "pg_json extension" do
     @db.literal(Sequel.pg_json('a'=>'b')).must_equal "'{\"a\":\"b\"}'::json"
   end
 
-  it "should literalize JSONHash and JSONArray to strings correctly" do
+  it "should literalize JSONBHash and JSONBArray to strings correctly" do
     @db.literal(Sequel.pg_jsonb([])).must_equal "'[]'::jsonb"
     @db.literal(Sequel.pg_jsonb([1, [2], {'a'=>'b'}])).must_equal "'[1,[2],{\"a\":\"b\"}]'::jsonb"
     @db.literal(Sequel.pg_jsonb({})).must_equal "'{}'::jsonb"
@@ -166,6 +181,35 @@ describe "pg_json extension" do
   it "should parse json type from the schema correctly" do
     @db.fetch = [{:name=>'id', :db_type=>'integer'}, {:name=>'i', :db_type=>'jsonb'}]
     @db.schema(:items).map{|e| e[1][:type]}.must_equal [:integer, :jsonb]
+  end
+
+  it "should set :callable_default schema entries if default value is recognized" do
+    @db.fetch = [{:name=>'id', :db_type=>'integer', :default=>'1'}, {:name=>'jh', :db_type=>'json', :default=>"'{}'::json"}, {:name=>'ja', :db_type=>'json', :default=>"'[]'::json"}, {:name=>'jbh', :db_type=>'jsonb', :default=>"'{}'::jsonb"}, {:name=>'jba', :db_type=>'jsonb', :default=>"'[]'::jsonb"}]
+    s = @db.schema(:items)
+    s[0][1][:callable_default].must_be_nil
+    v = s[1][1][:callable_default].call
+    Sequel::Postgres::JSONHash.===(v).must_equal true
+    @db.literal(v).must_equal "'{}'::json"
+    v['a'] = 'b'
+    @db.literal(v).must_equal "'{\"a\":\"b\"}'::json"
+
+    v = s[2][1][:callable_default].call
+    Sequel::Postgres::JSONArray.===(v).must_equal true
+    @db.literal(v).must_equal "'[]'::json"
+    v << 1
+    @db.literal(v).must_equal "'[1]'::json"
+
+    v = s[3][1][:callable_default].call
+    Sequel::Postgres::JSONBHash.===(v).must_equal true
+    @db.literal(v).must_equal "'{}'::jsonb"
+    v['a'] = 'b'
+    @db.literal(v).must_equal "'{\"a\":\"b\"}'::jsonb"
+
+    v = s[4][1][:callable_default].call
+    Sequel::Postgres::JSONBArray.===(v).must_equal true
+    @db.literal(v).must_equal "'[]'::jsonb"
+    v << 1
+    @db.literal(v).must_equal "'[1]'::jsonb"
   end
 
   it "should support typecasting for the json type" do

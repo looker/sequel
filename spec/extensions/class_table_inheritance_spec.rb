@@ -1,12 +1,12 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "class_table_inheritance plugin" do
   before do
-    @db = Sequel.mock(:autoid=>proc{|sql| 1})
+    @db = Sequel.mock(:numrows=>1, :autoid=>proc{|sql| 1})
     def @db.supports_schema_parsing?() true end
     def @db.schema(table, opts={})
       {:employees=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}]],
-       :managers=>[[:id, {:type=>:integer}], [:num_staff, {:type=>:integer}]],
+       :managers=>[[:id, {:type=>:integer}], [:num_staff, {:type=>:integer}] ],
        :executives=>[[:id, {:type=>:integer}], [:num_managers, {:type=>:integer}]],
        :staff=>[[:id, {:type=>:integer}], [:manager_id, {:type=>:integer}]],
        }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
@@ -26,7 +26,7 @@ describe "class_table_inheritance plugin" do
     class ::Employee < Sequel::Model(@db)
       def _save_refresh; @values[:id] = 1 end
       def self.columns
-        dataset.columns
+        dataset.columns || dataset.opts[:from].first.expression.columns
       end
       plugin :class_table_inheritance, :key=>:kind, :table_map=>{:Staff=>:staff}
     end 
@@ -40,110 +40,126 @@ describe "class_table_inheritance plugin" do
     class ::Staff < Employee
       many_to_one :manager
     end 
+    class ::Intern < Employee
+    end 
     @ds = Employee.dataset
     @db.sqls
   end
   after do
-    Object.send(:remove_const, :Ceo)
-    Object.send(:remove_const, :Executive)
-    Object.send(:remove_const, :Manager)
-    Object.send(:remove_const, :Staff)
-    Object.send(:remove_const, :Employee)
+    [:Intern, :Ceo, :Executive, :Manager, :Staff, :Employee].each{|s| Object.send(:remove_const, s)}
   end
 
-  it "#cti_base_model should be the model that loaded the plugin" do
-    Executive.cti_base_model.must_equal Employee
+  it "should freeze CTI information when freezing model class" do
+    Employee.freeze
+    Employee.cti_models.frozen?.must_equal true
+    Employee.cti_tables.frozen?.must_equal true
+    Employee.cti_instance_dataset.frozen?.must_equal true
+    Employee.cti_table_columns.frozen?.must_equal true
+    Employee.cti_table_map.frozen?.must_equal true
   end
 
-  it "#cti_columns should be a mapping of table names to columns" do
-    Executive.cti_columns.must_equal(:employees=>[:id, :name, :kind], :managers=>[:id, :num_staff], :executives=>[:id, :num_managers])
+  it "should not attempt to use prepared statements" do
+    Manager.plugin :prepared_statements
+    Manager.load(:id=>1, :kind=>'Manager', :num_staff=>2).save
+    @db.sqls.must_equal ["UPDATE employees SET kind = 'Manager' WHERE (id = 1)", "UPDATE managers SET num_staff = 2 WHERE (id = 1)"]
+
+    Employee.plugin :prepared_statements
+    Employee.load(:id=>2, :kind=>'Employee').save
+    @db.sqls.must_equal ["UPDATE employees SET kind = 'Employee' WHERE (id = 2)"]
+  end
+
+  it "#cti_models.first should be the model that loaded the plugin" do
+    Executive.cti_models.first.must_equal Employee
   end
 
   it "should have simple_table = nil for all subclasses" do
-    Manager.simple_table.must_equal nil
-    Executive.simple_table.must_equal nil
-    Ceo.simple_table.must_equal nil
-    Staff.simple_table.must_equal nil
+    Manager.simple_table.must_be_nil
+    Executive.simple_table.must_be_nil
+    Ceo.simple_table.must_be_nil
+    Staff.simple_table.must_be_nil
+    Intern.simple_table.must_be_nil
   end
   
   it "should have working row_proc if using set_dataset in subclass to remove columns" do
     Manager.set_dataset(Manager.dataset.select(*(Manager.columns - [:blah])))
-    Manager.dataset._fetch = {:id=>1, :kind=>'Ceo'}
+    Manager.dataset = Manager.dataset.with_fetch(:id=>1, :kind=>'Ceo')
     Manager[1].must_equal Ceo.load(:id=>1, :kind=>'Ceo')
   end
 
-  it "should use a joined dataset in subclasses" do
+  it "should use a subquery in subclasses" do
     Employee.dataset.sql.must_equal 'SELECT * FROM employees'
-    Manager.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)'
-    Executive.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)'
-    Ceo.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE (employees.kind IN (\'Ceo\'))'
-    Staff.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)'
+    Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees'
+    Executive.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)) AS employees'
+    Ceo.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE (employees.kind IN (\'Ceo\'))) AS employees'
+    Staff.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)) AS employees'
+    Intern.dataset.sql.must_equal 'SELECT * FROM employees WHERE (employees.kind IN (\'Intern\'))'
   end
   
   it "should return rows with the correct class based on the polymorphic_key value" do
-    @ds._fetch = [{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Staff'}]
-    Employee.all.collect{|x| x.class}.must_equal [Employee, Manager, Executive, Ceo, Staff]
+    @ds.with_fetch([{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Staff'}, {:kind=>'Intern'}]).all.collect{|x| x.class}.must_equal [Employee, Manager, Executive, Ceo, Staff, Intern]
   end 
   
   it "should return rows with the correct class based on the polymorphic_key value for subclasses" do
-    Manager.dataset._fetch = [{:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}]
-    Manager.all.collect{|x| x.class}.must_equal [Manager, Executive, Ceo]
+    Manager.dataset.with_fetch([{:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}]).all.collect{|x| x.class}.must_equal [Manager, Executive, Ceo]
   end
   
   it "should have refresh return all columns in subclass after loading from superclass" do
-    Employee.dataset._fetch = [{:id=>1, :name=>'A', :kind=>'Ceo'}]
-    Ceo.instance_dataset._fetch = [{:id=>1, :name=>'A', :kind=>'Ceo', :num_staff=>3, :num_managers=>2}]
+    Employee.dataset = Employee.dataset.with_fetch([{:id=>1, :name=>'A', :kind=>'Ceo'}])
+    Ceo.dataset = Ceo.dataset.with_fetch([{:id=>1, :name=>'A', :kind=>'Ceo', :num_staff=>3, :num_managers=>2}])
     a = Employee.first
     a.class.must_equal Ceo
     a.values.must_equal(:id=>1, :name=>'A', :kind=>'Ceo')
     a.refresh.values.must_equal(:id=>1, :name=>'A', :kind=>'Ceo', :num_staff=>3, :num_managers=>2)
     @db.sqls.must_equal ["SELECT * FROM employees LIMIT 1",
-      "SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE ((employees.kind IN ('Ceo')) AND (executives.id = 1)) LIMIT 1"]
+      "SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE (employees.kind IN ('Ceo'))) AS employees WHERE (id = 1) LIMIT 1"]
   end
   
-  it "should return rows with the current class if cti_key is nil" do
-    Employee.plugin(:class_table_inheritance)
-    Employee.dataset._fetch = [{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Staff'}]
-    Employee.all.collect{|x| x.class}.must_equal [Employee, Employee, Employee, Employee, Employee]
+  it "should return rows with the current class if sti_key is nil" do
+    Employee.plugin :class_table_inheritance
+    Employee.dataset.with_fetch([{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Staff'}, {:kind=>'Intern'}]).all.map{|x| x.class}.must_equal [Employee, Employee, Employee, Employee, Employee, Employee]
   end
   
-  it "should return rows with the current class if cti_key is nil in subclasses" do
-    Employee.plugin(:class_table_inheritance)
+  it "should return rows with the current class if sti_key is nil in subclasses" do
+    Employee.plugin :class_table_inheritance
     Object.send(:remove_const, :Executive)
     Object.send(:remove_const, :Manager)
     class ::Manager < Employee; end 
     class ::Executive < Manager; end 
-    Manager.dataset._fetch = [{:kind=>'Manager'}, {:kind=>'Executive'}]
-    Manager.all.collect{|x| x.class}.must_equal [Manager, Manager]
+    Manager.dataset.with_fetch([{:kind=>'Manager'}, {:kind=>'Executive'}]).all.map{|x| x.class}.must_equal [Manager, Manager]
   end
   
   it "should handle a model map with integer values" do
-    Employee.plugin(:class_table_inheritance, :key=>:kind, :model_map=>{0=>:Employee, 1=>:Manager, 2=>:Executive, 3=>:Ceo})
+    Employee.plugin :class_table_inheritance, :key=>:kind, :model_map=>{0=>:Employee, 1=>:Manager, 2=>:Executive, 3=>:Ceo, 4=>:Intern}
+    Object.send(:remove_const, :Intern)
     Object.send(:remove_const, :Ceo)
     Object.send(:remove_const, :Executive)
     Object.send(:remove_const, :Manager)
+    class ::Intern < Employee; end 
     class ::Manager < Employee; end 
     class ::Executive < Manager; end 
     class ::Ceo < Executive; end 
-    Employee.dataset._fetch = [{:kind=>nil},{:kind=>0},{:kind=>1}, {:kind=>2}, {:kind=>3}]
-    Employee.all.collect{|x| x.class}.must_equal [Employee, Employee, Manager, Executive, Ceo]
-    Manager.dataset._fetch = [{:kind=>nil},{:kind=>0},{:kind=>1}, {:kind=>2}, {:kind=>3}]
+    Employee.dataset = Employee.dataset.with_fetch([{:kind=>nil},{:kind=>0},{:kind=>1}, {:kind=>2}, {:kind=>3}, {:kind=>4}])
+    Employee.all.collect{|x| x.class}.must_equal [Employee, Employee, Manager, Executive, Ceo, Intern]
+    Manager.dataset = Manager.dataset.with_fetch([{:kind=>nil},{:kind=>0},{:kind=>1}, {:kind=>2}, {:kind=>3}])
     Manager.all.collect{|x| x.class}.must_equal [Manager, Employee, Manager, Executive, Ceo]
   end
   
   it "should fallback to the main class if the given class does not exist" do
-    @ds._fetch = [{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Blah'}, {:kind=>'Staff'}]
-    Employee.all.collect{|x| x.class}.must_equal [Employee, Manager, Employee, Staff]
+    @ds.with_fetch([{:kind=>'Employee'}, {:kind=>'Manager'}, {:kind=>'Blah'}, {:kind=>'Staff'}]).all.map{|x| x.class}.must_equal [Employee, Manager, Employee, Staff]
   end
   
   it "should fallback to the main class if the given class does not exist in subclasses" do
-    Manager.dataset._fetch = [{:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Blah'}]
-    Manager.all.collect{|x| x.class}.must_equal [Manager, Executive, Ceo, Manager]
+    Manager.dataset.with_fetch([{:kind=>'Manager'}, {:kind=>'Executive'}, {:kind=>'Ceo'}, {:kind=>'Blah'}]).all.map{|x| x.class}.must_equal [Manager, Executive, Ceo, Manager]
   end
 
   it "should sets the model class name for the key when creating new parent class records" do
     Employee.create
     @db.sqls.must_equal ["INSERT INTO employees (kind) VALUES ('Employee')"]
+  end
+  
+  it "should sets the model class name for the key when creating new class records for subclass without separate table" do
+    Intern.create
+    @db.sqls.must_equal ["INSERT INTO employees (kind) VALUES ('Intern')"]
   end
   
   it "should sets the model class name for the key when creating new subclass records" do
@@ -153,12 +169,12 @@ describe "class_table_inheritance plugin" do
       "INSERT INTO executives (id) VALUES (1)"]
   end
 
-  it "should ignore existing cti_key value when creating new records" do
+  it "should ignore existing sti_key value when creating new records" do
     Employee.create(:kind=>'Manager')
     @db.sqls.must_equal ["INSERT INTO employees (kind) VALUES ('Employee')"]
   end
     
-  it "should ignore existing cti_key value in subclasses" do
+  it "should ignore existing sti_key value in subclasses" do
     Manager.create(:kind=>'Executive')
     @db.sqls.must_equal ["INSERT INTO employees (kind) VALUES ('Manager')",
       "INSERT INTO managers (id) VALUES (1)"]
@@ -178,42 +194,41 @@ describe "class_table_inheritance plugin" do
   end
 
   it "should allow specifying a map of names to tables to override implicit mapping" do
-    Manager.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)'
-    Staff.dataset.sql.must_equal 'SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)'
+    Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees'
+    Staff.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)) AS employees'
   end
 
   it "should lazily load attributes for columns in subclass tables" do
-    Manager.instance_dataset._fetch = Manager.dataset._fetch = {:id=>1, :name=>'J', :kind=>'Ceo', :num_staff=>2}
+    Manager.dataset = Manager.dataset.with_fetch(:id=>1, :name=>'J', :kind=>'Ceo', :num_staff=>2)
     m = Manager[1]
-    @db.sqls.must_equal ['SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id) WHERE (managers.id = 1) LIMIT 1']
+    @db.sqls.must_equal ['SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees WHERE (id = 1) LIMIT 1']
     @db.fetch = {:num_managers=>3}
     m.must_be_kind_of Ceo
     m.num_managers.must_equal 3
-    @db.sqls.must_equal ['SELECT executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE (executives.id = 1) LIMIT 1']
+    @db.sqls.must_equal ['SELECT employees.num_managers FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)) AS employees WHERE (employees.id = 1) LIMIT 1']
     m.values.must_equal(:id=>1, :name=>'J', :kind=>'Ceo', :num_staff=>2, :num_managers=>3)
   end
 
   it "should lazily load columns in middle classes correctly when loaded from parent class" do
-    Employee.dataset._fetch = {:id=>1, :kind=>'Ceo'}
-    Manager.dataset._fetch = {:num_staff=>2}
+    Employee.dataset = Employee.dataset.with_fetch(:id=>1, :kind=>'Ceo')
+    @db.fetch = [[:num_staff=>2]]
     e = Employee[1]
     e.must_be_kind_of(Ceo)
     @db.sqls.must_equal ["SELECT * FROM employees WHERE (id = 1) LIMIT 1"]
     e.num_staff.must_equal 2
-    @db.sqls.must_equal ["SELECT managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id) WHERE (managers.id = 1) LIMIT 1"]
+    @db.sqls.must_equal ["SELECT employees.num_staff FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees WHERE (employees.id = 1) LIMIT 1"]
   end
 
   it "should eagerly load lazily columns in subclasses when loaded from parent class" do
-    Employee.dataset._fetch = {:id=>1, :kind=>'Ceo'}
-    Manager.dataset._fetch = {:id=>1, :num_staff=>2}
-    @db.fetch = {:id=>1, :num_managers=>3}
+    Employee.dataset = Employee.dataset.with_fetch(:id=>1, :kind=>'Ceo')
+    @db.fetch = [[{:id=>1, :num_staff=>2}], [{:id=>1, :num_managers=>3}]]
     e = Employee.all.first
     e.must_be_kind_of(Ceo)
     @db.sqls.must_equal ["SELECT * FROM employees"]
     e.num_staff.must_equal 2
-    @db.sqls.must_equal ["SELECT managers.id, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id) WHERE (managers.id IN (1))"]
+    @db.sqls.must_equal ["SELECT employees.id, employees.num_staff FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees WHERE (employees.id IN (1))"]
     e.num_managers.must_equal 3
-    @db.sqls.must_equal ['SELECT executives.id, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id) WHERE (executives.id IN (1))']
+    @db.sqls.must_equal ['SELECT employees.id, employees.num_managers FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)) AS employees WHERE (employees.id IN (1))']
   end
   
   it "should include schema for columns for tables for ancestor classes" do
@@ -221,66 +236,92 @@ describe "class_table_inheritance plugin" do
     Manager.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :num_staff=>{:type=>:integer})
     Executive.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :num_staff=>{:type=>:integer}, :num_managers=>{:type=>:integer})
     Staff.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :manager_id=>{:type=>:integer})
+    Intern.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string})
   end
 
   it "should use the correct primary key (which should have the same name in all subclasses)" do
-    [Employee, Manager, Executive, Ceo, Staff].each{|c| c.primary_key.must_equal :id}
+    [Employee, Manager, Executive, Ceo, Staff, Intern].each{|c| c.primary_key.must_equal :id}
   end
 
   it "should have table_name return the table name of the most specific table" do
     Employee.table_name.must_equal :employees
-    Manager.table_name.must_equal :managers
-    Executive.table_name.must_equal :executives
-    Ceo.table_name.must_equal :executives
-    Staff.table_name.must_equal :staff
+    Manager.table_name.must_equal :employees
+    Executive.table_name.must_equal :employees
+    Ceo.table_name.must_equal :employees
+    Staff.table_name.must_equal :employees
+    Intern.table_name.must_equal :employees
   end
 
   it "should delete the correct rows from all tables when deleting" do
+    Employee.load(:id=>1).delete
+    @db.sqls.must_equal ["DELETE FROM employees WHERE (id = 1)"]
+
+    Intern.load(:id=>1).delete
+    @db.sqls.must_equal ["DELETE FROM employees WHERE (id = 1)"]
+
     Ceo.load(:id=>1).delete
     @db.sqls.must_equal ["DELETE FROM executives WHERE (id = 1)", "DELETE FROM managers WHERE (id = 1)", "DELETE FROM employees WHERE (id = 1)"]
   end
 
   it "should not allow deletion of frozen object" do
-    o = Ceo.load(:id=>1)
-    o.freeze
-    proc{o.delete}.must_raise(Sequel::Error)
-    @db.sqls.must_equal []
+    [Ceo, Executive, Employee, Manager, Intern].each do |c|
+      o = c.load(:id=>1)
+      o.freeze
+      proc{o.delete}.must_raise(Sequel::Error)
+      @db.sqls.must_equal []
+    end
   end
 
-  it "should insert the correct rows into all tables when inserting" do
-    Ceo.create(:num_managers=>3, :num_staff=>2, :name=>'E')
-    sqls = @db.sqls
-    sqls.length.must_equal 3
-    sqls[0].must_match(/INSERT INTO employees \((name|kind), (name|kind)\) VALUES \('(E|Ceo)', '(E|Ceo)'\)/)
-    sqls[1].must_match(/INSERT INTO managers \((num_staff|id), (num_staff|id)\) VALUES \([12], [12]\)/)
-    sqls[2].must_match(/INSERT INTO executives \((num_managers|id), (num_managers|id)\) VALUES \([13], [13]\)/)
+  it "should insert the correct rows into all tables when inserting into parent class" do
+    Employee.create(:name=>'E')
+    @db.sqls.must_equal ["INSERT INTO employees (name, kind) VALUES ('E', 'Employee')"]
   end
     
-  it "should insert the correct rows into all tables when inserting when insert select is important" do
-    [Ceo, Manager, Employee].each do |klass|
-      def (klass.cti_instance_dataset).supports_insert_select?; true; end
-      def (klass.cti_instance_dataset).insert_select(v)
-        db.run(insert_sql(v) + " RETURNING *")
-        v.merge(:id=>1)
-      end
+  it "should insert the correct rows into all tables when inserting into subclass without separate table" do
+    Intern.create(:name=>'E')
+    @db.sqls.must_equal ["INSERT INTO employees (name, kind) VALUES ('E', 'Intern')"]
+  end
+    
+  it "should insert the correct rows into all tables when inserting" do
+    Ceo.create(:num_managers=>3, :num_staff=>2, :name=>'E')
+    @db.sqls.must_equal ["INSERT INTO employees (name, kind) VALUES ('E', 'Ceo')",
+      "INSERT INTO managers (id, num_staff) VALUES (1, 2)",
+      "INSERT INTO executives (id, num_managers) VALUES (1, 3)"]
+  end
+    
+  it "should insert the correct rows into all tables when inserting when insert_select is supported" do
+    [Executive, Manager, Employee].each do |klass|
+      klass.instance_variable_set(:@cti_instance_dataset, klass.cti_instance_dataset.with_extend do
+        def supports_insert_select?; true; end
+        def insert_select(v)
+          db.run(insert_sql(v) + " RETURNING *")
+          v.merge(:id=>1)
+        end
+      end)
     end
     Ceo.create(:num_managers=>3, :num_staff=>2, :name=>'E')
-    sqls = @db.sqls
-    sqls.length.must_equal 3
-    sqls[0].must_match(/INSERT INTO employees \((name|kind), (name|kind)\) VALUES \('(E|Ceo)', '(E|Ceo)'\) RETURNING \*/)
-    sqls[1].must_match(/INSERT INTO managers \((num_staff|id), (num_staff|id)\) VALUES \([12], [12]\) RETURNING \*/)
-    sqls[2].must_match(/INSERT INTO executives \((num_managers|id), (num_managers|id)\) VALUES \([13], [13]\) RETURNING \*/)
+    @db.sqls.must_equal ["INSERT INTO employees (name, kind) VALUES ('E', 'Ceo') RETURNING *",
+      "INSERT INTO managers (id, num_staff) VALUES (1, 2) RETURNING *",
+      "INSERT INTO executives (id, num_managers) VALUES (1, 3) RETURNING *"]
   end
     
   it "should insert the correct rows into all tables with a given primary key" do
     e = Ceo.new(:num_managers=>3, :num_staff=>2, :name=>'E')
     e.id = 2
     e.save
-    sqls = @db.sqls
-    sqls.length.must_equal 3
-    sqls[0].must_match(/INSERT INTO employees \((name|kind|id), (name|kind|id), (name|kind|id)\) VALUES \(('E'|'Ceo'|2), ('E'|'Ceo'|2), ('E'|'Ceo'|2)\)/)
-    sqls[1].must_match(/INSERT INTO managers \((num_staff|id), (num_staff|id)\) VALUES \(2, 2\)/)
-    sqls[2].must_match(/INSERT INTO executives \((num_managers|id), (num_managers|id)\) VALUES \([23], [23]\)/)
+    @db.sqls.must_equal ["INSERT INTO employees (id, name, kind) VALUES (2, 'E', 'Ceo')",
+      "INSERT INTO managers (id, num_staff) VALUES (2, 2)",
+      "INSERT INTO executives (id, num_managers) VALUES (2, 3)"]
+  end
+
+  it "should update the correct rows in all tables when updating parent class" do
+    Employee.load(:id=>2).update(:name=>'E')
+    @db.sqls.must_equal ["UPDATE employees SET name = 'E' WHERE (id = 2)"]
+  end
+
+  it "should update the correct rows in all tables when updating subclass without separate table" do
+    Intern.load(:id=>2).update(:name=>'E')
+    @db.sqls.must_equal ["UPDATE employees SET name = 'E' WHERE (id = 2)"]
   end
 
   it "should update the correct rows in all tables when updating" do
@@ -288,22 +329,28 @@ describe "class_table_inheritance plugin" do
     @db.sqls.must_equal ["UPDATE employees SET name = 'E' WHERE (id = 2)", "UPDATE managers SET num_staff = 2 WHERE (id = 2)", "UPDATE executives SET num_managers = 3 WHERE (id = 2)"]
   end
 
+  it "should raise error if one of the updates does not update a single row" do
+    @db.numrows = [1, 0]
+    proc{Ceo.load(:id=>2).update(:num_managers=>3, :num_staff=>2, :name=>'E')}.must_raise Sequel::NoExistingObject
+    @db.sqls.must_equal ["UPDATE employees SET name = 'E' WHERE (id = 2)", "UPDATE managers SET num_staff = 2 WHERE (id = 2)"]
+  end
+
   it "should handle many_to_one relationships correctly" do
-    Manager.dataset._fetch = {:id=>3, :name=>'E', :kind=>'Ceo', :num_managers=>3}
+    Manager.dataset = Manager.dataset.with_fetch(:id=>3, :name=>'E', :kind=>'Ceo', :num_managers=>3)
     Staff.load(:manager_id=>3).manager.must_equal Ceo.load(:id=>3, :name=>'E', :kind=>'Ceo', :num_managers=>3)
-    @db.sqls.must_equal ['SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id) WHERE (managers.id = 3) LIMIT 1']
+    @db.sqls.must_equal ['SELECT * FROM (SELECT employees.id, employees.name, employees.kind, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees WHERE (id = 3) LIMIT 1']
   end
   
   it "should handle one_to_many relationships correctly" do
-    Staff.dataset._fetch = {:id=>1, :name=>'S', :kind=>'Staff', :manager_id=>3}
+    Staff.dataset = Staff.dataset.with_fetch(:id=>1, :name=>'S', :kind=>'Staff', :manager_id=>3)
     Ceo.load(:id=>3).staff_members.must_equal [Staff.load(:id=>1, :name=>'S', :kind=>'Staff', :manager_id=>3)]
-    @db.sqls.must_equal ['SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id) WHERE (staff.manager_id = 3)']
+    @db.sqls.must_equal ['SELECT * FROM (SELECT employees.id, employees.name, employees.kind, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)) AS employees WHERE (employees.manager_id = 3)']
   end
 end
 
-describe "class_table_inheritance plugin without sti_key" do
+describe "class_table_inheritance plugin without sti_key with :alias option" do
   before do
-    @db = Sequel.mock(:autoid=>proc{|sql| 1})
+    @db = Sequel.mock(:numrows=>1, :autoid=>proc{|sql| 1})
     def @db.supports_schema_parsing?() true end
     def @db.schema(table, opts={})
       {:employees=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}]],
@@ -327,9 +374,9 @@ describe "class_table_inheritance plugin without sti_key" do
     class ::Employee < Sequel::Model(@db)
       def _save_refresh; @values[:id] = 1 end
       def self.columns
-        dataset.columns
+        dataset.columns || dataset.opts[:from].first.expression.columns
       end
-      plugin :class_table_inheritance, :table_map=>{:Staff=>:staff}
+      plugin :class_table_inheritance, :table_map=>{:Staff=>:staff}, :alias=>:emps
     end 
     class ::Manager < Employee
       one_to_many :staff_members, :class=>:Staff
@@ -350,30 +397,29 @@ describe "class_table_inheritance plugin without sti_key" do
   end
 
   it "should have simple_table = nil for all subclasses" do
-    Manager.simple_table.must_equal nil
-    Executive.simple_table.must_equal nil
-    Staff.simple_table.must_equal nil
+    Manager.simple_table.must_be_nil
+    Executive.simple_table.must_be_nil
+    Staff.simple_table.must_be_nil
   end
   
   it "should have working row_proc if using set_dataset in subclass to remove columns" do
     Manager.set_dataset(Manager.dataset.select(*(Manager.columns - [:blah])))
-    Manager.dataset._fetch = {:id=>1}
+    Manager.dataset = Manager.dataset.with_fetch(:id=>1)
     Manager[1].must_equal Manager.load(:id=>1)
   end
 
   it "should use a joined dataset in subclasses" do
     Employee.dataset.sql.must_equal 'SELECT * FROM employees'
-    Manager.dataset.sql.must_equal 'SELECT employees.id, employees.name, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)'
-    Executive.dataset.sql.must_equal 'SELECT employees.id, employees.name, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)'
-    Staff.dataset.sql.must_equal 'SELECT employees.id, employees.name, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)'
+    Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS emps'
+    Executive.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, managers.num_staff, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)) AS emps'
+    Staff.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)) AS emps'
   end
   
-  it "should return rows with the current class if cti_key is nil" do
+  it "should return rows with the current class if sti_key is nil" do
     Employee.plugin(:class_table_inheritance)
-    Employee.dataset._fetch = [{}]
+    Employee.dataset = Employee.dataset.with_fetch([{}])
     Employee.first.class.must_equal Employee
   end
-  
   
   it "should include schema for columns for tables for ancestor classes" do
     Employee.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string})
@@ -388,9 +434,9 @@ describe "class_table_inheritance plugin without sti_key" do
 
   it "should have table_name return the table name of the most specific table" do
     Employee.table_name.must_equal :employees
-    Manager.table_name.must_equal :managers
-    Executive.table_name.must_equal :executives
-    Staff.table_name.must_equal :staff
+    Manager.table_name.must_equal :emps
+    Executive.table_name.must_equal :emps
+    Staff.table_name.must_equal :emps
   end
 
   it "should delete the correct rows from all tables when deleting" do
@@ -407,22 +453,18 @@ describe "class_table_inheritance plugin without sti_key" do
 
   it "should insert the correct rows into all tables when inserting" do
     Executive.create(:num_managers=>3, :num_staff=>2, :name=>'E')
-    sqls = @db.sqls
-    sqls.length.must_equal 3
-    sqls[0].must_match(/INSERT INTO employees \(name\) VALUES \('E'\)/)
-    sqls[1].must_match(/INSERT INTO managers \((num_staff|id), (num_staff|id)\) VALUES \([12], [12]\)/)
-    sqls[2].must_match(/INSERT INTO executives \((num_managers|id), (num_managers|id)\) VALUES \([13], [13]\)/)
-    end
+    @db.sqls.must_equal ["INSERT INTO employees (name) VALUES ('E')",
+      "INSERT INTO managers (id, num_staff) VALUES (1, 2)",
+      "INSERT INTO executives (id, num_managers) VALUES (1, 3)"]
+  end
     
   it "should insert the correct rows into all tables with a given primary key" do
     e = Executive.new(:num_managers=>3, :num_staff=>2, :name=>'E')
     e.id = 2
     e.save
-    sqls = @db.sqls
-    sqls.length.must_equal 3
-    sqls[0].must_match(/INSERT INTO employees \((name|id), (name|id)\) VALUES \(('E'|2), ('E'|2)\)/)
-    sqls[1].must_match(/INSERT INTO managers \((num_staff|id), (num_staff|id)\) VALUES \(2, 2\)/)
-    sqls[2].must_match(/INSERT INTO executives \((num_managers|id), (num_managers|id)\) VALUES \([23], [23]\)/)
+    @db.sqls.must_equal ["INSERT INTO employees (id, name) VALUES (2, 'E')",
+      "INSERT INTO managers (id, num_staff) VALUES (2, 2)",
+      "INSERT INTO executives (id, num_managers) VALUES (2, 3)"]
   end
 
   it "should update the correct rows in all tables when updating" do
@@ -431,14 +473,96 @@ describe "class_table_inheritance plugin without sti_key" do
   end
 
   it "should handle many_to_one relationships correctly" do
-    Manager.dataset._fetch = {:id=>3, :name=>'E',  :num_staff=>3}
+    Manager.dataset = Manager.dataset.with_fetch(:id=>3, :name=>'E',  :num_staff=>3)
     Staff.load(:manager_id=>3).manager.must_equal Manager.load(:id=>3, :name=>'E', :num_staff=>3)
-    @db.sqls.must_equal ['SELECT employees.id, employees.name, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id) WHERE (managers.id = 3) LIMIT 1']
+    @db.sqls.must_equal ['SELECT * FROM (SELECT employees.id, employees.name, managers.num_staff FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS emps WHERE (id = 3) LIMIT 1']
   end
   
   it "should handle one_to_many relationships correctly" do
-    Staff.dataset._fetch = {:id=>1, :name=>'S', :manager_id=>3}
+    Staff.dataset = Staff.dataset.with_fetch(:id=>1, :name=>'S', :manager_id=>3)
     Executive.load(:id=>3).staff_members.must_equal [Staff.load(:id=>1, :name=>'S', :manager_id=>3)]
-    @db.sqls.must_equal ['SELECT employees.id, employees.name, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id) WHERE (staff.manager_id = 3)']
+    @db.sqls.must_equal ['SELECT * FROM (SELECT employees.id, employees.name, staff.manager_id FROM employees INNER JOIN staff ON (staff.id = employees.id)) AS emps WHERE (emps.manager_id = 3)']
   end
 end
+
+describe "class_table_inheritance plugin with duplicate columns" do
+  it "should raise error if no columns are explicitly ignored" do
+    @db = Sequel.mock(:autoid=>proc{|sql| 1})
+    def @db.supports_schema_parsing?() true end
+    def @db.schema(table, opts={})
+      {:employees=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}]],
+       :managers=>[[:id, {:type=>:integer}], [:name, {:type=>:string}]],
+       }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
+    end
+    @db.extend_datasets do
+      def columns
+        {[:employees]=>[:id, :name, :kind],
+         [:managers]=>[:id, :name],
+        }[opts[:from] + (opts[:join] || []).map{|x| x.table}]
+      end
+    end
+    class ::Employee < Sequel::Model(@db)
+      def _save_refresh; @values[:id] = 1 end
+      def self.columns
+        dataset.columns || dataset.opts[:from].first.expression.columns
+      end
+      plugin :class_table_inheritance
+    end 
+    proc{class ::Manager < Employee; end}.must_raise Sequel::Error
+  end
+
+  describe "with certain sub-class columns ignored" do
+    before do
+      @db = Sequel.mock(:autoid=>proc{|sql| 1})
+      def @db.supports_schema_parsing?() true end
+      def @db.schema(table, opts={})
+        {:employees=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}], [:updated_at, {:type=>:datetime}]],
+         :managers=>[[:id, {:type=>:integer}], [:num_staff, {:type=>:integer}], [:updated_at, {:type=>:datetime}], [:another_duplicate_column, {:type=>:integer}]],
+         :executives=>[[:id, {:type=>:integer}], [:num_managers, {:type=>:integer}], [:updated_at, {:type=>:datetime}], [:another_duplicate_column, {:type=>:integer}]],
+         }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
+      end
+      @db.extend_datasets do
+        def columns
+          {[:employees]=>[:id, :name, :kind, :updated_at],
+           [:managers]=>[:id, :num_staff, :updated_at, :another_duplicate_column],
+           [:executives]=>[:id, :num_managers, :updated_at, :another_duplicate_column],
+           [:employees, :managers]=>[:id, :name, :kind, :updated_at, :num_staff],
+          }[opts[:from] + (opts[:join] || []).map{|x| x.table}]
+        end
+      end
+      class ::Employee < Sequel::Model(@db)
+        def _save_refresh; @values[:id] = 1 end
+        def self.columns
+          dataset.columns || dataset.opts[:from].first.expression.columns
+        end
+        plugin :class_table_inheritance, :ignore_subclass_columns=>[:updated_at]
+      end 
+      class ::Manager < Employee
+        Manager.cti_ignore_subclass_columns.push(:another_duplicate_column)
+      end
+      class ::Executive < Manager; end
+    end
+
+    it "should not use the ignored column in a sub-class subquery" do
+      Employee.dataset.sql.must_equal 'SELECT * FROM employees'
+      Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, employees.updated_at, managers.num_staff, managers.another_duplicate_column FROM employees INNER JOIN managers ON (managers.id = employees.id)) AS employees'
+      Executive.dataset.sql.must_equal 'SELECT * FROM (SELECT employees.id, employees.name, employees.kind, employees.updated_at, managers.num_staff, managers.another_duplicate_column, executives.num_managers FROM employees INNER JOIN managers ON (managers.id = employees.id) INNER JOIN executives ON (executives.id = managers.id)) AS employees'
+    end
+
+    it "should include schema for columns for tables for ancestor classes" do
+      Employee.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :updated_at=>{:type=>:datetime})
+      Manager.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :updated_at=>{:type=>:datetime}, :num_staff=>{:type=>:integer}, :another_duplicate_column=>{:type=>:integer})
+      Executive.db_schema.must_equal(:id=>{:primary_key=>true, :type=>:integer}, :name=>{:type=>:string}, :kind=>{:type=>:string}, :updated_at=>{:type=>:datetime}, :num_staff=>{:type=>:integer}, :another_duplicate_column=>{:type=>:integer}, :num_managers=>{:type=>:integer})
+    end
+
+    after do
+      Object.send(:remove_const, :Executive)
+    end
+  end
+
+  after do
+    Object.send(:remove_const, :Manager)
+    Object.send(:remove_const, :Employee)
+  end
+end
+

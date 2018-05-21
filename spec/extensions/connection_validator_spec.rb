@@ -1,9 +1,9 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 connection_validator_specs = shared_description do
   describe "connection validator" do
     before do
-      @db.extend(Module.new do
+      @m = Module.new do
         def disconnect_connection(conn)
           @sqls << 'disconnect'
         end
@@ -19,7 +19,8 @@ connection_validator_specs = shared_description do
           conn.valid = true
           conn
         end
-      end)
+      end
+      @db.extend @m
       @db.extension(:connection_validator)
     end
 
@@ -52,6 +53,23 @@ connection_validator_specs = shared_description do
       c2.wont_be_same_as(c1)
     end
 
+    it "should handle Database#disconnect calls while the connection is checked out" do
+      @db.synchronize{|c| @db.disconnect}
+    end
+
+    it "should handle disconnected connections" do
+      proc{@db.synchronize{|c| raise Sequel::DatabaseDisconnectError}}.must_raise Sequel::DatabaseDisconnectError
+      @db.sqls.must_equal ['disconnect']
+    end
+
+    it "should handle :connection_handling => :disconnect setting" do
+      @db = Sequel.mock(@db.opts.merge(:connection_handling => :disconnect))
+      @db.extend @m
+      @db.extension(:connection_validator)
+      @db.synchronize{}
+      @db.sqls.must_equal ['disconnect']
+    end
+
     it "should disconnect multiple connections repeatedly if they are not valid" do
       q, q1 = Queue.new, Queue.new
       c1 = nil
@@ -78,6 +96,13 @@ connection_validator_specs = shared_description do
       c3.wont_be_same_as(c2)
     end
 
+    it "should not leak connection references during disconnect" do
+      @db.synchronize{}
+      @db.pool.instance_variable_get(:@connection_timestamps).size.must_equal 1
+      @db.disconnect
+      @db.pool.instance_variable_get(:@connection_timestamps).size.must_equal 0
+    end
+
     it "should not leak connection references" do
       c1 = @db.synchronize do |c|
         @db.pool.instance_variable_get(:@connection_timestamps).must_equal({})
@@ -97,7 +122,7 @@ connection_validator_specs = shared_description do
     end
 
     it "should handle case where determining validity requires a connection" do
-      @db.meta_def(:valid_connection?){|c| synchronize{}; true}
+      def @db.valid_connection?(c) synchronize{}; true end
       @db.pool.connection_validation_timeout = -1
       c1 = @db.synchronize{|c| c}
       @db.synchronize{|c| c}.must_be_same_as(c1)
@@ -107,14 +132,13 @@ end
 
 describe "Sequel::ConnectionValidator with threaded pool" do
   before do
-    @db = Sequel.mock
+    @db = Sequel.mock(:test=>false)
   end
   include connection_validator_specs
 end
 describe "Sequel::ConnectionValidator with sharded threaded pool" do
   before do
-    @db = Sequel.mock(:servers=>{})
+    @db = Sequel.mock(:test=>false, :servers=>{})
   end
   include connection_validator_specs
 end
-

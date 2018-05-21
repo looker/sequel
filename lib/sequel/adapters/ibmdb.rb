@@ -1,19 +1,11 @@
 # frozen-string-literal: true
 
 require 'ibm_db'
-Sequel.require 'adapters/shared/db2'
+require_relative 'shared/db2'
 
 module Sequel
 
   module IBMDB
-    @convert_smallint_to_bool = true
-
-    class << self
-      # Whether to convert smallint values to bool, true by default.
-      # Can also be overridden per dataset.
-      attr_accessor :convert_smallint_to_bool
-    end
-
     tt = Class.new do
       def boolean(s) !s.to_i.zero? end
       def int(s) s.to_i end
@@ -26,13 +18,14 @@ module Sequel
       :blob => ::Sequel::SQL::Blob.method(:new),
       :time => ::Sequel.method(:string_to_time),
       :date => ::Sequel.method(:string_to_date)
-    }
+    }.freeze
 
-    # Wraps an underlying connection to DB2 using IBM_DB.
+    # Wraps an underlying connection to DB2 using IBM_DB, to provide a more
+    # rubyish API.
     class Connection
       # A hash with prepared statement name symbol keys, where each value is 
       # a two element array with an sql string and cached Statement value.
-      attr_accessor :prepared_statements
+      attr_reader :prepared_statements
 
       # Error class for exceptions raised by the connection.
       class Error < StandardError
@@ -187,6 +180,9 @@ module Sequel
 
       # Hash of connection procs for converting
       attr_reader :conversion_procs
+
+      # Whether to convert smallint values to bool for this Database instance
+      attr_accessor :convert_smallint_to_bool
     
       # Create a new connection object for the given server.
       def connect(server)
@@ -209,7 +205,6 @@ module Sequel
         Connection.new(connection_params)
       end
 
-      # Execute the given SQL on the database.
       def execute(sql, opts=OPTS, &block)
         if sql.is_a?(Symbol)
           execute_prepared_statement(sql, opts, &block)
@@ -220,8 +215,6 @@ module Sequel
         raise_error(e)
       end
 
-      # Execute the given SQL on the database, returning the last inserted
-      # identity value.
       def execute_insert(sql, opts=OPTS)
         synchronize(opts[:server]) do |c|
           if sql.is_a?(Symbol)
@@ -264,9 +257,15 @@ module Sequel
         end
       end
 
+      def freeze
+        @conversion_procs.freeze
+        super
+      end
+
       private
 
-      # Execute the given SQL on the database.
+      # Execute the given SQL on the database, yielding the related statement if a block
+      # is given or returning the number of affected rows if not, and ensuring the statement is freed.
       def _execute(conn, sql, opts)
         stmt = log_connection_yield(sql, conn){conn.execute(sql)}
         if block_given?
@@ -279,6 +278,7 @@ module Sequel
       end
 
       def adapter_initialize
+        @convert_smallint_to_bool = typecast_value_boolean(opts.fetch(:convert_smallint_to_bool, true))
         @conversion_procs = DB2_TYPES.dup
         @conversion_procs[:timestamp] = method(:to_application_timestamp)
       end
@@ -286,14 +286,14 @@ module Sequel
       # IBM_DB uses an autocommit setting instead of sending SQL queries.
       # So starting a transaction just turns autocommit off.
       def begin_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_BEGIN, conn){conn.autocommit = false}
+        log_connection_yield('Transaction.begin', conn){conn.autocommit = false}
         set_transaction_isolation(conn, opts)
       end
 
       # This commits transaction in progress on the
       # connection and sets autocommit back on.
       def commit_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_COMMIT, conn){conn.commit}
+        log_connection_yield('Transaction.commit', conn){conn.commit}
       end
     
       def database_error_classes
@@ -304,14 +304,16 @@ module Sequel
         exception.sqlstate
       end
 
+      def dataset_class_default
+        Dataset
+      end
+
       # Don't convert smallint to boolean for the metadata
       # dataset, since the DB2 metadata does not use
       # boolean columns, and some smallint columns are
       # accidently treated as booleans.
-      def metadata_dataset
-        ds = super
-        ds.convert_smallint_to_bool = false
-        ds
+      def _metadata_dataset
+        super.with_convert_smallint_to_bool(false)
       end
 
       # Format Numeric, Date, and Time types specially for use
@@ -337,12 +339,12 @@ module Sequel
       # This rolls back the transaction in progress on the
       # connection and sets autocommit back on.
       def rollback_transaction(conn, opts=OPTS)
-        log_connection_yield(TRANSACTION_ROLLBACK, conn){conn.rollback}
+        log_connection_yield('Transaction.rollback', conn){conn.rollback}
       end
 
       # Convert smallint type to boolean if convert_smallint_to_bool is true
       def schema_column_type(db_type)
-        if Sequel::IBMDB.convert_smallint_to_bool && db_type =~ /smallint/i 
+        if convert_smallint_to_bool && db_type =~ /smallint/i 
           :boolean
         else
           super
@@ -353,39 +355,31 @@ module Sequel
     class Dataset < Sequel::Dataset
       include Sequel::DB2::DatasetMethods
 
-      Database::DatasetClass = self
-
       module CallableStatementMethods
         # Extend given dataset with this module so subselects inside subselects in
         # prepared statements work.
         def subselect_sql_append(sql, ds)
-          ps = ds.to_prepared_statement(:select).clone(:append_sql=>sql)
-          ps.extend(CallableStatementMethods)
+          ps = ds.to_prepared_statement(:select).
+            clone(:append_sql=>sql, :prepared_args=>prepared_args).
+            with_extend(CallableStatementMethods)
           ps = ps.bind(@opts[:bind_vars]) if @opts[:bind_vars]
-          ps.prepared_args = prepared_args
           ps.prepared_sql
         end
       end
       
       PreparedStatementMethods = prepared_statements_module(:prepare_bind, Sequel::Dataset::UnnumberedArgumentMapper)
 
-      # Emulate support of bind arguments in called statements.
-      def call(type, bind_arguments={}, *values, &block)
-        ps = to_prepared_statement(type, values)
-        ps.extend(CallableStatementMethods)
-        ps.call(bind_arguments, &block)
-      end
-
       # Whether to convert smallint to boolean arguments for this dataset.
-      # Defaults to the IBMDB module setting.
+      # Defaults to the Database setting.
       def convert_smallint_to_bool
-        defined?(@convert_smallint_to_bool) ? @convert_smallint_to_bool : (@convert_smallint_to_bool = IBMDB.convert_smallint_to_bool)
+        opts.has_key?(:convert_smallint_to_bool) ? opts[:convert_smallint_to_bool] : db.convert_smallint_to_bool
       end
 
-      # Override the default IBMDB.convert_smallint_to_bool setting for this dataset.
-      attr_writer :convert_smallint_to_bool
+      # Return a cloned dataset with the convert_smallint_to_bool option set.
+      def with_convert_smallint_to_bool(v)
+        clone(:convert_smallint_to_bool=>v)
+      end
 
-      # Fetch the rows from the database and yield plain hashes.
       def fetch_rows(sql)
         execute(sql) do |stmt|
           columns = []
@@ -397,10 +391,10 @@ module Sequel
             type = stmt.field_type(i).downcase.to_sym
             # decide if it is a smallint from precision
             type = :boolean  if type == :int && convert && stmt.field_precision(i) < 8
-            type = :blob if type == :clob && Sequel::DB2.use_clob_as_blob
+            type = :blob if type == :clob && db.use_clob_as_blob
             columns << [key, cps[type]]
           end
-          cols = columns.map{|c| c.at(0)}
+          cols = columns.map{|c| c[0]}
           self.columns = cols
 
           while res = stmt.fetch_array
@@ -414,16 +408,14 @@ module Sequel
         self
       end
 
-      # Store the given type of prepared statement in the associated database
-      # with the given name.
-      def prepare(type, name=nil, *values)
-        ps = to_prepared_statement(type, values)
-        ps.extend(PreparedStatementMethods)
-        if name
-          ps.prepared_statement_name = name
-          db.set_prepared_statement(name, ps)
-        end
-        ps
+      private
+
+      def bound_variable_modules
+        [CallableStatementMethods]
+      end
+
+      def prepared_statement_modules
+        [PreparedStatementMethods]
       end
     end
   end

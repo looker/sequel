@@ -1,28 +1,24 @@
-require 'rubygems'
+require_relative "sequel_warning"
 
 if ENV['COVERAGE']
-  require File.join(File.dirname(File.expand_path(__FILE__)), "sequel_coverage")
+  require_relative "sequel_coverage"
   SimpleCov.sequel_coverage(:filter=>%r{lib/sequel/extensions/core_extensions\.rb\z})
 end
 
-unless Object.const_defined?('Sequel') && Sequel.const_defined?('Model')
-  $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
-  require 'sequel'
-  Sequel::Deprecation.backtrace_filter = true
-end
-
-Sequel.quote_identifiers = false
-Sequel.identifier_input_method = nil
-Sequel.identifier_output_method = nil
+$:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../lib/"))
+require_relative '../lib/sequel'
 
 Regexp.send(:include, Sequel::SQL::StringMethods)
 String.send(:include, Sequel::SQL::StringMethods)
 Sequel.extension :core_extensions
-if RUBY_VERSION < '1.9.0'
-  Sequel.extension :ruby18_symbol_extensions
-end
+Sequel.extension :symbol_aref
+Sequel.extension :virtual_row_method_block
 
+gem 'minitest'
 require 'minitest/autorun'
+require 'minitest/hooks/default'
+
+require_relative "deprecation_helper.rb"
 
 describe "Sequel core extensions" do
   it "should have Sequel.core_extensions? be true if enabled" do
@@ -32,67 +28,37 @@ end
 
 describe "Core extensions" do
   before do
-    db = Sequel::Database.new
-    @d = db[:items]
-    def @d.supports_regexp?; true end
-    def @d.l(*args, &block)
-      literal(filter_expr(*args, &block))
-    end
-    def @d.lit(*args)
-      literal(*args)
+    db = Sequel.mock
+    @d = db[:items].with_extend do
+      def supports_regexp?; true end
+      def l(*args, &block)
+        literal(filter_expr(*args, &block))
+      end
+      def lit(*args)
+        literal(*args)
+      end
     end
   end
   
-  if RUBY_VERSION < '1.9.0'
-    it "should not allow inequality operations on true, false, or nil" do
-      @d.lit(:x > 1).must_equal "(x > 1)"
-      @d.lit(:x < true).must_equal "(x < 't')"
-      @d.lit(:x >= false).must_equal "(x >= 'f')"
-      @d.lit(:x <= nil).must_equal "(x <= NULL)"
-    end
-
-    it "should not allow inequality operations on boolean complex expressions" do
-      @d.lit(:x > (:y > 5)).must_equal "(x > (y > 5))"
-      @d.lit(:x < (:y < 5)).must_equal "(x < (y < 5))"
-      @d.lit(:x >= (:y >= 5)).must_equal "(x >= (y >= 5))"
-      @d.lit(:x <= (:y <= 5)).must_equal "(x <= (y <= 5))"
-      @d.lit(:x > {:y => nil}).must_equal "(x > (y IS NULL))"
-      @d.lit(:x < ~{:y => nil}).must_equal "(x < (y IS NOT NULL))"
-      @d.lit(:x >= {:y => 5}).must_equal "(x >= (y = 5))"
-      @d.lit(:x <= ~{:y => 5}).must_equal "(x <= (y != 5))"
-      @d.lit(:x >= {:y => [1,2,3]}).must_equal "(x >= (y IN (1, 2, 3)))"
-      @d.lit(:x <= ~{:y => [1,2,3]}).must_equal "(x <= (y NOT IN (1, 2, 3)))"
-    end
-    
-    it "should support >, <, >=, and <= via Symbol#>,<,>=,<=" do
-      @d.l(:x > 100).must_equal '(x > 100)'
-      @d.l(:x < 100.01).must_equal '(x < 100.01)'
-      @d.l(:x >= 100000000000000000000000000000000000).must_equal '(x >= 100000000000000000000000000000000000)'
-      @d.l(:x <= 100).must_equal '(x <= 100)'
-    end
-    
-    it "should support negation of >, <, >=, and <= via Symbol#~" do
-      @d.l(~(:x > 100)).must_equal '(x <= 100)'
-      @d.l(~(:x < 100.01)).must_equal '(x >= 100.01)'
-      @d.l(~(:x >= 100000000000000000000000000000000000)).must_equal '(x < 100000000000000000000000000000000000)'
-      @d.l(~(:x <= 100)).must_equal '(x > 100)'
-    end
-    
-    it "should support double negation via ~" do
-      @d.l(~~(:x > 100)).must_equal '(x > 100)'
-    end
-  end
   it "should support NOT via Symbol#~" do
     @d.l(~:x).must_equal 'NOT x'
+  end
+
+  with_symbol_splitting "should support NOT via Symbol#~ for splittable symbols" do
     @d.l(~:x__y).must_equal 'NOT x.y'
   end
   
-  it "should support + - * / via Symbol#+,-,*,/" do
+  it "should support + - * / power via Symbol#+,-,*,/,**" do
     @d.l(:x + 1 > 100).must_equal '((x + 1) > 100)'
     @d.l((:x * :y) < 100.01).must_equal '((x * y) < 100.01)'
     @d.l((:x - :y/2) >= 100000000000000000000000000000000000).must_equal '((x - (y / 2)) >= 100000000000000000000000000000000000)'
     @d.l((((:x - :y)/(:x + :y))*:z) <= 100).must_equal '((((x - y) / (x + y)) * z) <= 100)'
     @d.l(~((((:x - :y)/(:x + :y))*:z) <= 100)).must_equal '((((x - y) / (x + y)) * z) > 100)'
+    @d.l(~((((:x ** :y)/(:x + :y))*:z) <= 100)).must_equal '(((power(x, y) / (x + y)) * z) > 100)'
+  end
+
+  it "should support coercion for symbols" do
+    @d.l(1 + :x > 2).must_equal '((1 + x) > 2)'
   end
   
   it "should support LIKE via Symbol#like" do
@@ -220,7 +186,7 @@ describe "Core extensions" do
     @d.lit([:x.sql_function(1), 'y.z'.lit].sql_string_join(', ')).must_equal "(x(1) || ', ' || y.z)"
     @d.lit([:x, 1, :y].sql_string_join).must_equal "(x || '1' || y)"
     @d.lit([:x, 1, :y].sql_string_join(', ')).must_equal "(x || ', ' || '1' || ', ' || y)"
-    @d.lit([:x, 1, :y].sql_string_join(:y__z)).must_equal "(x || y.z || '1' || y.z || y)"
+    @d.lit([:x, 1, :y].sql_string_join(Sequel[:y][:z])).must_equal "(x || y.z || '1' || y.z || y)"
     @d.lit([:x, 1, :y].sql_string_join(1)).must_equal "(x || '1' || '1' || '1' || y)"
     @d.lit([:x, :y].sql_string_join('y.x || x.y'.lit)).must_equal "(x || y.x || x.y || y)"
     @d.lit([[:x, :y].sql_string_join, [:a, :b].sql_string_join].sql_string_join).must_equal "(x || y || a || b)"
@@ -266,12 +232,11 @@ describe "Array#case and Hash#case" do
   it "should return SQL CASE expression" do
     @d.literal({:x=>:y}.case(:z)).must_equal '(CASE WHEN x THEN y ELSE z END)'
     @d.literal({:x=>:y}.case(:z, :exp)).must_equal '(CASE exp WHEN x THEN y ELSE z END)'
-    ['(CASE WHEN x THEN y WHEN a THEN b ELSE z END)',
-     '(CASE WHEN a THEN b WHEN x THEN y ELSE z END)'].must_include(@d.literal({:x=>:y, :a=>:b}.case(:z)))
+    @d.literal({:x=>:y, :a=>:b}.case(:z)).must_equal '(CASE WHEN x THEN y WHEN a THEN b ELSE z END)'
     @d.literal([[:x, :y]].case(:z)).must_equal '(CASE WHEN x THEN y ELSE z END)'
     @d.literal([[:x, :y], [:a, :b]].case(:z)).must_equal '(CASE WHEN x THEN y WHEN a THEN b ELSE z END)'
     @d.literal([[:x, :y], [:a, :b]].case(:z, :exp)).must_equal '(CASE exp WHEN x THEN y WHEN a THEN b ELSE z END)'
-    @d.literal([[:x, :y], [:a, :b]].case(:z, :exp__w)).must_equal '(CASE exp.w WHEN x THEN y WHEN a THEN b ELSE z END)'
+    @d.literal([[:x, :y], [:a, :b]].case(:z, Sequel[:exp][:w])).must_equal '(CASE exp.w WHEN x THEN y WHEN a THEN b ELSE z END)'
   end
 
   it "should return SQL CASE expression with expression even if nil" do
@@ -290,27 +255,25 @@ describe "Array#case and Hash#case" do
   end
 end
 
-describe "Array#sql_value_list and #sql_array" do
+describe "Array#sql_value_list" do
   before do
     @d = Sequel.mock.dataset
   end
 
   it "should treat the array as an SQL value list instead of conditions when used as a placeholder value" do
-    @d.filter("(a, b) IN ?", [[:x, 1], [:y, 2]]).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x = 1) AND (y = 2)))'
-    @d.filter("(a, b) IN ?", [[:x, 1], [:y, 2]].sql_value_list).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
-    @d.filter("(a, b) IN ?", [[:x, 1], [:y, 2]].sql_array).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
+    @d.filter(Sequel.lit("(a, b) IN ?", [[:x, 1], [:y, 2]])).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x = 1) AND (y = 2)))'
+    @d.filter(Sequel.lit("(a, b) IN ?", [[:x, 1], [:y, 2]].sql_value_list)).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
   end
 
   it "should be no difference when used as a hash value" do
     @d.filter([:a, :b]=>[[:x, 1], [:y, 2]]).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
     @d.filter([:a, :b]=>[[:x, 1], [:y, 2]].sql_value_list).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
-    @d.filter([:a, :b]=>[[:x, 1], [:y, 2]].sql_array).sql.must_equal 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
   end
 end
 
 describe "String#lit" do
   before do
-    @ds = Sequel::Database.new[:t]
+    @ds = Sequel.mock[:t]
   end
 
   it "should return an LiteralString object" do
@@ -326,16 +289,14 @@ describe "String#lit" do
     a = 'DISTINCT ?'.lit(:a)
     a.must_be_kind_of(Sequel::SQL::PlaceholderLiteralString)
     @ds.literal(a).must_equal 'DISTINCT a'
-    @ds.quote_identifiers = true
-    @ds.literal(a).must_equal 'DISTINCT "a"'
+    @ds.with_quote_identifiers(true).literal(a).must_equal 'DISTINCT "a"'
   end
   
   it "should handle named placeholders if given a single argument hash" do
     a = 'DISTINCT :b'.lit(:b=>:a)
     a.must_be_kind_of(Sequel::SQL::PlaceholderLiteralString)
     @ds.literal(a).must_equal 'DISTINCT a'
-    @ds.quote_identifiers = true
-    @ds.literal(a).must_equal 'DISTINCT "a"'
+    @ds.with_quote_identifiers(true).literal(a).must_equal 'DISTINCT "a"'
   end
 
   it "should treat placeholder literal strings as generic expressions" do
@@ -392,7 +353,9 @@ describe "#desc" do
   
   it "should format a DESC clause for a column ref" do
     @ds.literal(:test.desc).must_equal 'test DESC'
+  end
     
+  with_symbol_splitting "should format a DESC clause for a column ref with a splitting symbol" do
     @ds.literal(:items__price.desc).must_equal 'items.price DESC'
   end
 
@@ -408,7 +371,9 @@ describe "#asc" do
   
   it "should format a ASC clause for a column ref" do
     @ds.literal(:test.asc).must_equal 'test ASC'
+  end
     
+  with_symbol_splitting "should format a ASC clause for a column ref for a splittable symbol" do
     @ds.literal(:items__price.asc).must_equal 'items.price ASC'
   end
 
@@ -424,7 +389,9 @@ describe "#as" do
   
   it "should format a AS clause for a column ref" do
     @ds.literal(:test.as(:t)).must_equal 'test AS t'
-    
+  end  
+
+  with_symbol_splitting "should format a AS clause for a column ref for splittable symbols" do
     @ds.literal(:items__price.as(:p)).must_equal 'items.price AS p'
   end
 
@@ -439,24 +406,14 @@ end
 
 describe "Column references" do
   before do
-    @ds = Sequel::Database.new.dataset
-    def @ds.quoted_identifier_append(sql, c)
-      sql << "`#{c}`"
-    end
-    @ds.quote_identifiers = true
+    @ds = Sequel.mock.dataset.with_quote_identifiers(true).with_extend{def quoted_identifier_append(sql, c) sql << "`#{c}`" end}
   end
   
   it "should be quoted properly" do
     @ds.literal(:xyz).must_equal "`xyz`"
-    @ds.literal(:xyz__abc).must_equal "`xyz`.`abc`"
-
     @ds.literal(:xyz.as(:x)).must_equal "`xyz` AS `x`"
-    @ds.literal(:xyz__abc.as(:x)).must_equal "`xyz`.`abc` AS `x`"
-
-    @ds.literal(:xyz___x).must_equal "`xyz` AS `x`"
-    @ds.literal(:xyz__abc___x).must_equal "`xyz`.`abc` AS `x`"
   end
-  
+
   it "should be quoted properly in SQL functions" do
     @ds.literal(:avg.sql_function(:xyz)).must_equal "avg(`xyz`)"
     @ds.literal(:avg.sql_function(:xyz, 1)).must_equal "avg(`xyz`, 1)"
@@ -470,6 +427,13 @@ describe "Column references" do
   
   it "should be quoted properly in a cast function" do
     @ds.literal(:x.cast(:integer)).must_equal "CAST(`x` AS integer)"
+  end
+
+  with_symbol_splitting "should be quoted properly when using symbol splitting" do
+    @ds.literal(:xyz__abc).must_equal "`xyz`.`abc`"
+    @ds.literal(:xyz__abc.as(:x)).must_equal "`xyz`.`abc` AS `x`"
+    @ds.literal(:xyz___x).must_equal "`xyz` AS `x`"
+    @ds.literal(:xyz__abc___x).must_equal "`xyz`.`abc` AS `x`"
     @ds.literal(:x__y.cast('varchar(20)')).must_equal "CAST(`x`.`y` AS varchar(20))"
   end
 end
@@ -478,17 +442,6 @@ describe "Blob" do
   it "#to_sequel_blob should return self" do
     blob = "x".to_sequel_blob
     blob.to_sequel_blob.object_id.must_equal blob.object_id
-  end
-end
-
-if RUBY_VERSION < '1.9.0'
-  describe "Symbol#[]" do
-    it "should format an SQL Function" do
-      ds = Sequel.mock.dataset
-      ds.literal(:xyz[]).must_equal 'xyz()'
-      ds.literal(:xyz[1]).must_equal 'xyz(1)'
-      ds.literal(:xyz[1, 2, :abc[3]]).must_equal 'xyz(1, 2, abc(3))'
-    end
   end
 end
 
@@ -507,37 +460,35 @@ describe "Symbol#*" do
     @ds.literal(:abc.*(5)).must_equal '(abc * 5)'
   end
 
-  it "should support qualified symbols if no argument" do
+  with_symbol_splitting "should support qualified symbols if no argument" do
     @ds.literal(:xyz__abc.*).must_equal 'xyz.abc.*'
   end
 end
 
 describe "Symbol" do
   before do
-    @ds = Sequel.mock.dataset
-    @ds.quote_identifiers = true
-    @ds.identifier_input_method = :upcase
+    @ds = Sequel.mock.dataset.with_quote_identifiers(true)
   end
 
   it "#identifier should format an identifier" do
-    @ds.literal(:xyz__abc.identifier).must_equal '"XYZ__ABC"'
+    @ds.literal(:xyz__abc.identifier).must_equal '"xyz__abc"'
   end
 
   it "#qualify should format a qualified column" do
-    @ds.literal(:xyz.qualify(:abc)).must_equal '"ABC"."XYZ"'
+    @ds.literal(:xyz.qualify(:abc)).must_equal '"abc"."xyz"'
   end
 
   it "#qualify should work on QualifiedIdentifiers" do
-    @ds.literal(:xyz.qualify(:abc).qualify(:def)).must_equal '"DEF"."ABC"."XYZ"'
+    @ds.literal(:xyz.qualify(:abc).qualify(:def)).must_equal '"def"."abc"."xyz"'
   end
 
-  it "should be able to qualify an identifier" do
-    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).must_equal '"XYZ"."ABC"."XYZ"'
+  with_symbol_splitting "should be able to qualify an identifier" do
+    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).must_equal '"xyz"."abc"."xyz"'
   end
 
   it "should be able to specify a schema.table.column" do
-    @ds.literal(:column.qualify(:table.qualify(:schema))).must_equal '"SCHEMA"."TABLE"."COLUMN"'
-    @ds.literal(:column.qualify(:table__name.identifier.qualify(:schema))).must_equal '"SCHEMA"."TABLE__NAME"."COLUMN"'
+    @ds.literal(:column.qualify(:table.qualify(:schema))).must_equal '"schema"."table"."column"'
+    @ds.literal(:column.qualify(:table__name.identifier.qualify(:schema))).must_equal '"schema"."table__name"."column"'
   end
 
   it "should be able to specify order" do
@@ -552,13 +503,13 @@ describe "Symbol" do
   it "should work correctly with objects" do
     o = Object.new
     def o.sql_literal(ds) "(foo)" end
-    @ds.literal(:column.qualify(o)).must_equal '(foo)."COLUMN"'
+    @ds.literal(:column.qualify(o)).must_equal '(foo)."column"'
   end
 end
 
 describe "Symbol" do
   before do
-    @ds = Sequel::Database.new.dataset
+    @ds = Sequel.mock.dataset
   end
   
   it "should support sql_function method" do
@@ -572,9 +523,12 @@ describe "Symbol" do
 
   it "should support sql array accesses via sql_subscript" do
     @ds.literal(:abc.sql_subscript(1)).must_equal "abc[1]"
-    @ds.literal(:abc__def.sql_subscript(1)).must_equal "abc.def[1]"
     @ds.literal(:abc.sql_subscript(1)|2).must_equal "abc[1, 2]"
     @ds.literal(:abc.sql_subscript(1)[2]).must_equal "abc[1][2]"
+  end
+
+  with_symbol_splitting "should support sql array accesses via sql_subscript for splittable symbols" do
+    @ds.literal(:abc__def.sql_subscript(1)).must_equal "abc.def[1]"
   end
 
   it "should support cast_numeric and cast_string" do
@@ -697,3 +651,112 @@ describe "Postgres extensions integration" do
     @db.literal((1..2).pg_range(:int4range)).must_equal "int4range(1,2,'[]')"
   end
 end
+
+describe "symbol_aref extensions" do
+  before do
+    @db = Sequel.mock
+  end
+
+  it "Symbol#[] should create qualified identifier if given a symbol" do
+    @db.literal(:x[:y]).must_equal "x.y"
+  end
+
+  it "Symbol#[] should create qualified identifier if given an identifier" do
+    @db.literal(:x[Sequel[:y]]).must_equal "x.y"
+  end
+
+  it "Symbol#[] should create qualified identifier if given a qualified identifier" do
+    @db.literal(:x[:y[:z]]).must_equal "x.y.z"
+  end
+
+  it "should not affect other arguments to Symbol#[]" do
+    :x[0].must_equal "x"
+  end
+end
+
+describe Sequel::SQL::VirtualRow do
+  before do
+    @d = Sequel.mock[:items].with_quote_identifiers(true).with_extend do
+      def supports_window_functions?; true end
+      def l(*args, &block)
+        literal(filter_expr(*args, &block))
+      end
+    end
+  end
+
+  it "should treat methods without blocks normally" do
+    @d.l{column}.must_equal '"column"'
+    @d.l{foo(a)}.must_equal 'foo("a")'
+  end
+
+
+  it "should treat methods with a block and no arguments as a function call with no arguments" do
+    @d.l{version{}}.must_equal 'version()'
+  end
+
+  it "should treat methods with a block and a leading argument :* as a function call with the SQL wildcard" do
+    @d.l{count(:*){}}.must_equal 'count(*)'
+  end
+
+  it "should treat methods with a block and a leading argument :distinct as a function call with DISTINCT and the additional method arguments" do
+    @d.l{count(:distinct, column1){}}.must_equal 'count(DISTINCT "column1")'
+    @d.l{count(:distinct, column1, column2){}}.must_equal 'count(DISTINCT "column1", "column2")'
+  end
+
+  it "should raise an error if an unsupported argument is used with a block" do
+    proc{@d.where{count(:blah){}}}.must_raise(Sequel::Error)
+  end
+
+  it "should treat methods with a block and a leading argument :over as a window function call" do
+    @d.l{rank(:over){}}.must_equal 'rank() OVER ()'
+  end
+
+  it "should support :partition options for window function calls" do
+    @d.l{rank(:over, :partition=>column1){}}.must_equal 'rank() OVER (PARTITION BY "column1")'
+    @d.l{rank(:over, :partition=>[column1, column2]){}}.must_equal 'rank() OVER (PARTITION BY "column1", "column2")'
+  end
+
+  it "should support :args options for window function calls" do
+    @d.l{avg(:over, :args=>column1){}}.must_equal 'avg("column1") OVER ()'
+    @d.l{avg(:over, :args=>[column1, column2]){}}.must_equal 'avg("column1", "column2") OVER ()'
+  end
+
+  it "should support :order option for window function calls" do
+    @d.l{rank(:over, :order=>column1){}}.must_equal 'rank() OVER (ORDER BY "column1")'
+    @d.l{rank(:over, :order=>[column1, column2]){}}.must_equal 'rank() OVER (ORDER BY "column1", "column2")'
+  end
+
+  it "should support :window option for window function calls" do
+    @d.l{rank(:over, :window=>:win){}}.must_equal 'rank() OVER ("win")'
+  end
+
+  it "should support :*=>true option for window function calls" do
+    @d.l{count(:over, :* =>true){}}.must_equal 'count(*) OVER ()'
+  end
+
+  it "should support :frame=>:all option for window function calls" do
+    @d.l{rank(:over, :frame=>:all){}}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)'
+  end
+
+  it "should support :frame=>:rows option for window function calls" do
+    @d.l{rank(:over, :frame=>:rows){}}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should support :frame=>'some string' option for window function calls" do
+    @d.l{rank(:over, :frame=>'RANGE BETWEEN 3 PRECEDING AND CURRENT ROW'){}}.must_equal 'rank() OVER (RANGE BETWEEN 3 PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should raise an error if an invalid :frame option is used" do
+    proc{@d.l{rank(:over, :frame=>:blah){}}}.must_raise(Sequel::Error)
+  end
+
+  it "should support all these options together" do
+    @d.l{count(:over, :* =>true, :partition=>a, :order=>b, :window=>:win, :frame=>:rows){}}.must_equal 'count(*) OVER ("win" PARTITION BY "a" ORDER BY "b" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should raise an error if window functions are not supported" do
+    proc{@d.with_extend{def supports_window_functions?; false end}.l{count(:over, :* =>true, :partition=>a, :order=>b, :window=>:win, :frame=>:rows){}}}.must_raise(Sequel::Error)
+    proc{Sequel.mock.dataset.filter{count(:over, :* =>true, :partition=>a, :order=>b, :window=>:win, :frame=>:rows){}}.sql}.must_raise(Sequel::Error)
+  end
+end
+

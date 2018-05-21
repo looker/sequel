@@ -1,6 +1,6 @@
 SEQUEL_ADAPTER_TEST = :db2
 
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper.rb')
+require_relative 'spec_helper'
 
 if DB.table_exists?(:test)
   DB.drop_table(:test)
@@ -30,7 +30,7 @@ end
 
 describe "Simple Dataset operations" do
   before(:all) do
-    Sequel::DB2.use_clob_as_blob = true
+    DB.use_clob_as_blob = true
     DB.create_table!(:items) do
       Integer :id, :primary_key => true
       Integer :number
@@ -43,7 +43,7 @@ describe "Simple Dataset operations" do
     @ds.delete
   end
   after(:all) do
-    Sequel::DB2.use_clob_as_blob = false
+    DB.use_clob_as_blob = false
     DB.drop_table(:items)
   end
 
@@ -88,53 +88,63 @@ describe Sequel::Database do
   end
 end
 
-describe "Sequel::IBMDB.convert_smallint_to_bool" do
+describe "Sequel::IBMDB::Database#convert_smallint_to_bool" do
   before do
     @db = DB
     @db.create_table!(:booltest){column :b, 'smallint'; column :i, 'integer'}
     @ds = @db[:booltest]
   end
   after do
-    Sequel::IBMDB.convert_smallint_to_bool = true
+    @db.convert_smallint_to_bool = true
     @db.drop_table(:booltest)
   end
   
   it "should consider smallint datatypes as boolean if set, but not larger smallints" do
     @db.schema(:booltest, :reload=>true).first.last[:type].must_equal :boolean
     @db.schema(:booltest, :reload=>true).first.last[:db_type].must_match /smallint/i
-    Sequel::IBMDB.convert_smallint_to_bool = false
+    @db.convert_smallint_to_bool = false
     @db.schema(:booltest, :reload=>true).first.last[:type].must_equal :integer
     @db.schema(:booltest, :reload=>true).first.last[:db_type].must_match /smallint/i
   end
   
   it "should return smallints as bools and integers as integers when set" do
-    Sequel::IBMDB.convert_smallint_to_bool = true
+    @db.convert_smallint_to_bool = true
     @ds.delete
-    @ds << {:b=>true, :i=>10}
+    @ds.insert(:b=>true, :i=>10)
     @ds.all.must_equal [{:b=>true, :i=>10}]
     @ds.delete
-    @ds << {:b=>false, :i=>0}
+    @ds.insert(:b=>false, :i=>0)
     @ds.all.must_equal [{:b=>false, :i=>0}]
     @ds.delete
-    @ds << {:b=>true, :i=>1}
+    @ds.insert(:b=>true, :i=>1)
     @ds.all.must_equal [{:b=>true, :i=>1}]
+
+    @ds = @ds.with_convert_smallint_to_bool(false)
+    @ds.delete
+    @ds.insert(:b=>true, :i=>10)
+    @ds.all.must_equal [{:b=>1, :i=>10}]
   end
 
   it "should return all smallints as integers when unset" do
-    Sequel::IBMDB.convert_smallint_to_bool = false
+    @db.convert_smallint_to_bool = false
     @ds.delete
-    @ds << {:b=>true, :i=>10}
+    @ds.insert(:b=>true, :i=>10)
     @ds.all.must_equal [{:b=>1, :i=>10}]
     @ds.delete
-    @ds << {:b=>false, :i=>0}
+    @ds.insert(:b=>false, :i=>0)
     @ds.all.must_equal [{:b=>0, :i=>0}]
     
     @ds.delete
-    @ds << {:b=>1, :i=>10}
+    @ds.insert(:b=>1, :i=>10)
     @ds.all.must_equal [{:b=>1, :i=>10}]
     @ds.delete
-    @ds << {:b=>0, :i=>0}
+    @ds.insert(:b=>0, :i=>0)
     @ds.all.must_equal [{:b=>0, :i=>0}]
+
+    @ds = @ds.with_convert_smallint_to_bool(true)
+    @ds.delete
+    @ds.insert(:b=>true, :i=>10)
+    @ds.all.must_equal [{:b=>true, :i=>10}]
   end
 end if DB.adapter_scheme == :ibmdb
 

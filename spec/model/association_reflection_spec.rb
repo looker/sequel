@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model::Associations::AssociationReflection, "#associated_class" do
   before do
@@ -15,10 +15,64 @@ describe Sequel::Model::Associations::AssociationReflection, "#associated_class"
     @c.association_reflection(:c).associated_class.must_equal ParParent
   end
 
+  it "should use the :class value if present" do
+    @c.many_to_one :c, :class=>@c
+    @c.one_to_many :cs, :class=>@c
+    c = @c.association_reflection(:c)
+    cs = @c.association_reflection(:cs)
+
+    c.association_method.must_equal :c
+    c.dataset_method.must_equal :c_dataset
+    c.setter_method.must_equal :c=
+    c._setter_method.must_equal :_c=
+
+    cs.association_method.must_equal :cs
+    cs.dataset_method.must_equal :cs_dataset
+    cs.add_method.must_equal :add_c
+    cs._add_method.must_equal :_add_c
+    cs.remove_method.must_equal :remove_c
+    cs._remove_method.must_equal :_remove_c
+    cs.remove_all_method.must_equal :remove_all_cs
+    cs._remove_all_method.must_equal :_remove_all_cs
+  end
+
+  it "should have inspect include association class and representation of association definition " do
+    ParParent.many_to_one :c
+    ParParent.association_reflection(:c).inspect.must_equal "#<Sequel::Model::Associations::ManyToOneAssociationReflection ParParent.many_to_one :c>"
+    ParParent.many_to_one :c, :class=>ParParent
+    ParParent.association_reflection(:c).inspect.must_equal "#<Sequel::Model::Associations::ManyToOneAssociationReflection ParParent.many_to_one :c, :class=>ParParent>"
+    ParParent.many_to_one :c, :class=>ParParent, :key=>:c_id
+    ParParent.association_reflection(:c).inspect.must_equal "#<Sequel::Model::Associations::ManyToOneAssociationReflection ParParent.many_to_one :c, :key=>:c_id, :class=>ParParent>"
+
+    @c.one_to_many :foos do |ds| ds end
+    @c.association_reflection(:foos).inspect.must_equal "#<Sequel::Model::Associations::OneToManyAssociationReflection #{@c.to_s}.one_to_many :foos, :block=>#{@c.association_reflection(:foos)[:block].inspect}>"
+  end
+
   it "should figure out the class if the :class value is not present" do
     @c.many_to_one :c, :class=>'ParParent'
     @c.association_reflection(:c).keys.wont_include(:class)
     @c.association_reflection(:c).associated_class.must_equal ParParent
+  end
+
+  it "should respect :class_namespace option for specifying the namespace" do
+    class ::ParParent
+      class ParParent < Sequel::Model; end
+    end
+    ParParent.many_to_one :par_parent, :class=>'ParParent'
+    ParParent.association_reflection(:par_parent).associated_class.must_equal ParParent
+    ParParent.many_to_one :par_parent, :class=>'ParParent', :class_namespace=>'ParParent'
+    ParParent.association_reflection(:par_parent).associated_class.must_equal ParParent::ParParent
+  end
+
+  it "should include association inspect output if an exception would be raised" do
+    r = @c.many_to_one(:c)
+
+    begin
+      r.associated_class
+    rescue NameError => e
+    end
+
+    e.message.must_include r.inspect
   end
 end
 
@@ -198,10 +252,10 @@ describe Sequel::Model::Associations::AssociationReflection, "#select" do
   it "should be blank if :select is not present for a many_to_one and one_to_many associaiton" do
     @c.one_to_many :cs, :class=>'ParParent'
     @c.association_reflection(:cs).keys.wont_include(:select)
-    @c.association_reflection(:cs).select.must_equal nil
+    @c.association_reflection(:cs).select.must_be_nil
     @c.many_to_one :c, :class=>'ParParent'
     @c.association_reflection(:c).keys.wont_include(:select)
-    @c.association_reflection(:c).select.must_equal nil
+    @c.association_reflection(:c).select.must_be_nil
   end
 end
 
@@ -250,11 +304,6 @@ describe Sequel::Model::Associations::AssociationReflection do
   before do
     @c = Class.new(Sequel::Model(:foo))
     def @c.name() "C" end
-  end
-
-  it "#eager_loading_predicate_key should be an alias of predicate_key for backwards compatibility" do
-    @c.one_to_many :cs, :class=>@c
-    @c.dataset.literal(@c.association_reflection(:cs).eager_loading_predicate_key).must_equal 'foo.c_id'
   end
 
   it "one_to_many #qualified_primary_key should be a qualified version of the primary key" do
@@ -309,11 +358,11 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
 
   it "should be nil by default for *_one associations" do
     @c.many_to_one :c, :class=>@c
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
     @c.one_to_one :c, :class=>@c
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
     @c.one_through_one :c, :class=>@c
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
   end
 
   it "should be :correlated_subquery by default for one_to_many and one_to_one with :order associations" do
@@ -332,11 +381,11 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
 
   it "should be nil for many_to_one associations even if :eager_limit_strategy or :filter_limit_strategy is used" do
     @c.many_to_one :c, :class=>@c, :eager_limit_strategy=>true
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
     @c.many_to_one :c, :class=>@c, :eager_limit_strategy=>:distinct_on
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
     @c.many_to_one :c, :class=>@c, :filter_limit_strategy=>true
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
   end
 
   it "should be a symbol for other associations if given a symbol" do
@@ -347,13 +396,13 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
   end
 
   it "should use :distinct_on for one_to_one associations if picking and the association dataset supports ordered distinct on" do
-    def (@c.dataset).supports_ordered_distinct_on?() true end
+    @c.dataset = @c.dataset.with_extend{def supports_ordered_distinct_on?; true end}
     @c.one_to_one :c, :class=>@c, :eager_limit_strategy=>true
     @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal :distinct_on
   end
 
   it "should use :window_function for associations if picking and the association dataset supports window functions" do
-    def (@c.dataset).supports_window_functions?() true end
+    @c.dataset = @c.dataset.with_extend{def supports_window_functions?; true end}
     @c.one_to_one :c, :class=>@c, :eager_limit_strategy=>true
     @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal :window_function
     @c.one_to_many :cs, :class=>@c, :eager_limit_strategy=>true, :limit=>1
@@ -363,21 +412,21 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
   end
 
   it "should use :ruby for one_to_many associations if the database doesn't support limits in subqueries" do
-    def (@c.dataset).supports_limits_in_correlated_subqueries?; false; end
+    @c.dataset = @c.dataset.with_extend{def supports_limits_in_correlated_subqueries?; false end}
     @c.one_to_many :cs, :class=>@c, :eager_limit_strategy=>true, :limit=>1
     @c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :ruby
   end
 
   it "should use :ruby for one_to_many associations if offset doesn't work in correlated subqueries and an offset is used" do
-    def (@c.dataset).supports_offsets_in_correlated_subqueries?; false; end
+    @c.dataset = @c.dataset.with_extend{def supports_offsets_in_correlated_subqueries?; false end}
     @c.one_to_many :cs, :class=>@c, :eager_limit_strategy=>true, :limit=>1
     @c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :correlated_subquery
     @c.one_to_many :cs, :class=>@c, :eager_limit_strategy=>true, :limit=>[1, 1]
     @c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :ruby
   end
 
-  it "should use :ruby for one_to_many associations if composite primary key is used and database does not multiple columns in IN" do
-    def (@c.dataset).supports_multiple_column_in?; false; end
+  it "should use :ruby for one_to_many associations if composite primary key is used and database does not support multiple columns in IN" do
+    @c.dataset = @c.dataset.with_extend{def supports_multiple_column_in?; false end}
     @c.set_primary_key [:id, :id2]
     @c.one_to_many :cs, :class=>@c, :eager_limit_strategy=>true, :limit=>1, :key=>[:id, :id2]
     @c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :ruby
@@ -404,7 +453,7 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
     c.dataset = :a
     c.one_to_many :cs, :class=>c, :limit=>1
     c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :correlated_subquery
-    def (c.dataset).supports_window_functions?() true end
+    c.dataset = c.dataset.with_extend{def supports_window_functions?; true end}
     c.many_to_many :cs, :class=>c, :limit=>1
     c.association_reflection(:cs).send(:filter_by_associations_limit_strategy).must_equal :window_function
   end
@@ -412,7 +461,7 @@ describe Sequel::Model::Associations::AssociationReflection, "#filter_by_associa
   it "should ignore Model.default_eager_limit_strategy for one_to_one associations" do
     @c.default_eager_limit_strategy = :window_function
     @c.one_to_one :c, :class=>@c
-    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_equal nil
+    @c.association_reflection(:c).send(:filter_by_associations_limit_strategy).must_be_nil
   end
 end
 
@@ -449,7 +498,7 @@ describe Sequel::Model, " association reflection methods" do
   end
 
   it "#association_reflection should return nil for nonexistent association" do
-    @c1.association_reflection(:blah).must_equal nil
+    @c1.association_reflection(:blah).must_be_nil
   end
 
   it "#association_reflection should return association reflection hash if association exists" do
@@ -482,7 +531,7 @@ describe Sequel::Model, " association reflection methods" do
     c.associate :many_to_one, :parent2, :class => @c1
     @c1.associations.must_equal [:parent]
     c.associations.sort_by{|x| x.to_s}.must_equal [:parent, :parent2]
-    c.instance_methods.map{|x| x.to_s}.must_include('parent')
+    c.instance_methods.must_include(:parent)
   end
 end
 
@@ -551,5 +600,204 @@ describe Sequel::Model::Associations::AssociationReflection, "with default assoc
     r = c.association_reflection(:d)
     r[:foo].must_equal 3
     r[:bar].must_equal 2
+  end
+
+  it "should have default_association_type_options take precedence over default_association_options" do
+    @c.default_association_options = {:foo=>2, :bar=>3}
+    @c.default_association_type_options[:many_to_one] = {:foo=>1, :bar=>2}
+    @c.many_to_one :c, :class=>@c, :foo=>3
+    r = @c.association_reflection(:c)
+    r[:foo].must_equal 3
+    r[:bar].must_equal 2
+  end
+
+  it "should use default_association_type_options as defaults" do
+    @c.default_association_type_options[:many_to_one] = {:foo=>1, :bar=>2}
+    @c.many_to_one :c, :class=>@c, :foo=>3
+    r = @c.association_reflection(:c)
+    r[:foo].must_equal 3
+    r[:bar].must_equal 2
+
+    @c.one_to_many :cs, :class=>@c, :foo=>3
+    r = @c.association_reflection(:cs)
+    r[:foo].must_equal 3
+    r[:bar].must_be_nil
+  end
+
+  it "should inherit default_association_type_options" do
+    @c.default_association_type_options[:many_to_one] = {:foo=>1, :bar=>2}
+    c = Class.new(@c)
+    c.many_to_one :c, :class=>c, :foo=>3
+    r = c.association_reflection(:c)
+    r[:foo].must_equal 3
+    r[:bar].must_equal 2
+
+    @c.default_association_type_options[:many_to_one][:bar] = 4
+    c.many_to_one :d, :class=>c, :foo=>3
+    r = c.association_reflection(:d)
+    r[:foo].must_equal 3
+    r[:bar].must_equal 2
+
+    c.one_to_many :ds, :class=>c, :foo=>3
+    r = c.association_reflection(:ds)
+    r[:foo].must_equal 3
+    r[:bar].must_be_nil
+  end
+end
+
+describe "Sequel::Model.freeze" do
+  it "should freeze the model class and not allow any changes to associations" do
+    model = Class.new(Sequel::Model(:items))
+    model.many_to_one :foo, :class=>model, :key=>:id
+    model.default_association_options = {:read_only=>true}
+    model.freeze
+
+    model.association_reflections.frozen?.must_equal true
+    model.association_reflection(:foo).frozen?.must_equal true
+    model.autoreloading_associations.frozen?.must_equal true
+    model.autoreloading_associations[:id].frozen?.must_equal true
+    model.default_association_options.frozen?.must_equal true
+  end
+
+  it "should allow subclasses of frozen model classes to modify associations" do
+    model = Class.new(Sequel::Model(:items))
+    model.many_to_one :foo, :class=>model, :key=>:id
+    model.freeze
+    model = Class.new(model)
+    model.dataset = :items2
+
+    model.association_reflection(:foo).frozen?.must_equal true
+    model.autoreloading_associations.frozen?.must_equal false
+    model.autoreloading_associations[:id].frozen?.must_equal false
+
+    model.many_to_one :bar, :class=>model, :key=>:id
+    model.many_to_one :foo, :class=>model, :key=>:id
+    model.association_reflections.frozen?.must_equal false
+    model.association_reflection(:foo).frozen?.must_equal false
+    model.association_reflection(:bar).frozen?.must_equal false
+
+    model.default_association_options.frozen?.wont_equal true
+    model.default_association_options = {:read_only=>true}
+    model.default_association_options.frozen?.wont_equal true
+  end
+end
+
+describe "Sequel::Model.finalize_associations" do
+  before do
+    class ::MtmItem < Sequel::Model
+      set_primary_key :mtm_id
+      many_to_many :items
+      many_to_one :item
+    end
+    class ::OtoItem < Sequel::Model
+      set_primary_key :oto_id
+    end
+    class ::Item < Sequel::Model
+      many_to_one :item
+      one_to_many :items, :limit=>10
+      one_to_one :mtm_item
+      many_to_many :mtm_items
+      one_through_one :oto_item
+    end
+    [MtmItem, OtoItem, Item].each(&:finalize_associations)
+  end
+  after do
+    Object.send(:remove_const, :Item)
+    Object.send(:remove_const, :MtmItem)
+    Object.send(:remove_const, :OtoItem)
+  end
+
+  it "AssociationReflection should have default finalize_settings method" do
+    Sequel::Model::Associations::AssociationReflection.new.finalize_settings[:associated_class].must_equal :class
+  end
+
+  it "should finalize many_to_one associations" do
+    r = Item.association_reflection(:item)
+    r[:class].must_equal Item
+    r[:_dataset].sql.must_equal "SELECT * FROM items LIMIT 1"
+    r[:associated_eager_dataset].sql.must_equal "SELECT * FROM items"
+    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT items.id FROM items WHERE (items.id IS NOT NULL)"
+    r[:placeholder_loader].wont_be_nil
+    r[:predicate_key].must_equal Sequel.qualify(:items, :id)
+    r[:primary_key].must_equal :id
+    r[:primary_keys].must_equal [:id]
+    r[:primary_key_method].must_equal :id
+    r[:primary_key_methods].must_equal [:id]
+    r[:qualified_primary_key].must_equal Sequel.qualify(:items, :id)
+    r.fetch(:reciprocal_type).must_equal :one_to_many
+    r.fetch(:reciprocal).must_equal :items
+  end
+
+  it "should finalize one_to_many associations" do
+    r = Item.association_reflection(:items)
+    r[:class].must_equal Item
+    r[:_dataset].sql.must_equal "SELECT * FROM items LIMIT 10"
+    r[:associated_eager_dataset].sql.must_equal "SELECT * FROM items"
+    r[:_eager_limit_strategy].must_equal :union
+    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT items.item_id FROM items WHERE ((items.item_id IS NOT NULL) AND (items.id IN (SELECT t1.id FROM items AS t1 WHERE (t1.item_id = items.item_id) LIMIT 10)))"
+    r[:placeholder_loader].wont_be_nil
+    r[:predicate_key].must_equal Sequel.qualify(:items, :item_id)
+    r[:predicate_keys].must_equal [Sequel.qualify(:items, :item_id)]
+    r[:qualified_primary_key].must_equal Sequel.qualify(:items, :id)
+    r.fetch(:reciprocal).must_equal :item
+  end
+
+  it "should finalize one_to_one associations" do
+    r = Item.association_reflection(:mtm_item)
+    r[:class].must_equal MtmItem
+    r[:_dataset].sql.must_equal "SELECT * FROM mtm_items LIMIT 1"
+    r[:associated_eager_dataset].sql.must_equal "SELECT * FROM mtm_items"
+    r[:_eager_limit_strategy].must_be_nil
+    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT mtm_items.item_id FROM mtm_items WHERE (mtm_items.item_id IS NOT NULL)"
+    r[:placeholder_loader].wont_be_nil
+    r[:predicate_key].must_equal Sequel.qualify(:mtm_items, :item_id)
+    r[:predicate_keys].must_equal [Sequel.qualify(:mtm_items, :item_id)]
+    r[:qualified_primary_key].must_equal Sequel.qualify(:items, :id)
+    r.fetch(:reciprocal).must_equal :item
+  end
+
+  it "should finalize many_to_many associations" do
+    r = Item.association_reflection(:mtm_items)
+    r[:class].must_equal MtmItem
+    r[:_dataset].sql.must_equal "SELECT mtm_items.* FROM mtm_items INNER JOIN items_mtm_items ON (items_mtm_items.mtm_item_id = mtm_items.mtm_id)"
+    r[:associated_eager_dataset].sql.must_equal "SELECT mtm_items.* FROM mtm_items INNER JOIN items_mtm_items ON (items_mtm_items.mtm_item_id = mtm_items.mtm_id)"
+    r[:_eager_limit_strategy].must_be_nil
+    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT items_mtm_items.item_id FROM mtm_items INNER JOIN items_mtm_items ON (items_mtm_items.mtm_item_id = mtm_items.mtm_id) WHERE (items_mtm_items.item_id IS NOT NULL)"
+    r[:placeholder_loader].wont_be_nil
+    r[:predicate_key].must_equal Sequel.qualify(:items_mtm_items, :item_id)
+    r[:predicate_keys].must_equal [Sequel.qualify(:items_mtm_items, :item_id)]
+    r.fetch(:reciprocal).must_equal :items
+    r[:associated_key_array].must_equal [Sequel.qualify(:items_mtm_items, :item_id).as(:x_foreign_key_x)]
+    r[:qualified_right_key].must_equal Sequel.qualify(:items_mtm_items, :mtm_item_id)
+    r[:join_table_source].must_equal :items_mtm_items
+    r[:join_table_alias].must_equal :items_mtm_items
+    r[:qualified_right_primary_key].must_equal Sequel.qualify(:mtm_items, :mtm_id)
+    r[:right_primary_key].must_equal :mtm_id
+    r[:right_primary_keys].must_equal [:mtm_id]
+    r[:right_primary_key_method].must_equal :mtm_id
+    r[:right_primary_key_methods].must_equal [:mtm_id]
+    r[:select].must_equal Sequel::SQL::ColumnAll.new(:mtm_items)
+  end
+
+  it "should finalize one_through_one associations" do
+    r = Item.association_reflection(:oto_item)
+    r[:class].must_equal OtoItem
+    r[:_dataset].sql.must_equal "SELECT oto_items.* FROM oto_items INNER JOIN items_oto_items ON (items_oto_items.oto_item_id = oto_items.oto_id) LIMIT 1"
+    r[:associated_eager_dataset].sql.must_equal "SELECT oto_items.* FROM oto_items INNER JOIN items_oto_items ON (items_oto_items.oto_item_id = oto_items.oto_id)"
+    r[:_eager_limit_strategy].must_be_nil
+    r[:filter_by_associations_conditions_dataset].sql.must_equal "SELECT items_oto_items.item_id FROM oto_items INNER JOIN items_oto_items ON (items_oto_items.oto_item_id = oto_items.oto_id) WHERE (items_oto_items.item_id IS NOT NULL)"
+    r[:placeholder_loader].wont_be_nil
+    r[:predicate_key].must_equal Sequel.qualify(:items_oto_items, :item_id)
+    r[:predicate_keys].must_equal [Sequel.qualify(:items_oto_items, :item_id)]
+    r[:associated_key_array].must_equal [Sequel.qualify(:items_oto_items, :item_id).as(:x_foreign_key_x)]
+    r[:qualified_right_key].must_equal Sequel.qualify(:items_oto_items, :oto_item_id)
+    r[:join_table_source].must_equal :items_oto_items
+    r[:join_table_alias].must_equal :items_oto_items
+    r[:qualified_right_primary_key].must_equal Sequel.qualify(:oto_items, :oto_id)
+    r[:right_primary_key].must_equal :oto_id
+    r[:right_primary_keys].must_equal [:oto_id]
+    r[:right_primary_key_method].must_equal :oto_id
+    r[:right_primary_key_methods].must_equal [:oto_id]
+    r[:select].must_equal Sequel::SQL::ColumnAll.new(:oto_items)
   end
 end

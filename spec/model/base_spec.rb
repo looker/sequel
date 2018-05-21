@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Model attribute setters" do
   before do
@@ -100,6 +100,15 @@ describe Sequel::Model, "dataset" do
   end
 end
   
+describe Sequel::Model, "has_dataset?" do
+  it "should return whether the model has a dataset" do
+    c = Class.new(Sequel::Model)
+    c.has_dataset?.must_equal false
+    c.dataset = c.db[:table]
+    c.has_dataset?.must_equal true
+  end
+end
+
 describe Sequel::Model, "implicit table names" do
   after do
     Object.send(:remove_const, :BlahBlah)
@@ -115,72 +124,6 @@ describe Sequel::Model, "implicit table names" do
   it "should automatically set datasets when anonymous class of Sequel::Model is used as superclass" do
     class BlahBlah < Class.new(Sequel::Model); end
     BlahBlah.dataset.sql.must_equal 'SELECT * FROM blah_blahs'
-  end
-end
-
-describe Sequel::Model, ".def_dataset_method" do
-  before do
-    @c = Class.new(Sequel::Model(:items))
-  end
-  
-  it "should add a method to the dataset and model if called with a block argument" do
-    @c.def_dataset_method(:return_3){3}
-    @c.return_3.must_equal 3
-    @c.dataset.return_3.must_equal 3
-  end
-
-  it "should handle weird method names" do
-    @c.def_dataset_method(:"return 3"){3}
-    @c.send(:"return 3").must_equal 3
-    @c.dataset.send(:"return 3").must_equal 3
-  end
-
-  it "should not add a model method if the model already responds to the method" do
-    @c.instance_eval do
-      def foo
-        1
-      end
-
-      private
-
-      def bar
-        2
-      end
-
-      def_dataset_method(:foo){3}
-      def_dataset_method(:bar){4}
-    end
-    @c.foo.must_equal 1
-    @c.dataset.foo.must_equal 3
-    @c.send(:bar).must_equal 2
-    @c.dataset.bar.must_equal 4
-  end
-
-  it "should add all passed methods to the model if called without a block argument" do
-    @c.def_dataset_method(:return_3, :return_4)
-    proc{@c.return_3}.must_raise(NoMethodError)
-    proc{@c.return_4}.must_raise(NoMethodError)
-    @c.dataset.instance_eval do
-      def return_3; 3; end
-      def return_4; 4; end
-    end
-    @c.return_3.must_equal 3
-    @c.return_4.must_equal 4
-  end
-
-  it "should cache calls and readd methods if set_dataset is used" do
-    @c.def_dataset_method(:return_3){3}
-    @c.set_dataset :items
-    @c.return_3.must_equal 3
-    @c.dataset.return_3.must_equal 3
-  end
-
-  it "should readd methods to subclasses, if set_dataset is used in a subclass" do
-    @c.def_dataset_method(:return_3){3}
-    c = Class.new(@c)
-    c.set_dataset :items
-    c.return_3.must_equal 3
-    c.dataset.return_3.must_equal 3
   end
 end
 
@@ -207,6 +150,18 @@ describe Sequel::Model, ".dataset_module" do
   it "should add methods defined in the module outside the block to the class" do
     @c.dataset_module.module_eval{def return_3() 3 end}
     @c.return_3.must_equal 3
+  end
+
+  it "should add methods that can't be called with normal method syntax as class methods" do
+    @c.dataset_module.module_eval{define_method(:'return 3'){3}}
+    @c.send(:'return 3').must_equal 3
+  end
+
+  it "should not add private or protected methods defined in the module to the class" do
+    @c.dataset_module{private; def return_3() 3 end}
+    @c.dataset_module{protected; def return_4() 4 end}
+    @c.respond_to?(:return_3).must_equal false
+    @c.respond_to?(:return_4).must_equal false
   end
 
   it "should cache calls and readd methods if set_dataset is used" do
@@ -279,7 +234,134 @@ describe Sequel::Model, ".dataset_module" do
     @c.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE (foo AND released)'
   end
 
-  it "should raise error if called with both an argument and ablock" do
+  it "should have dataset_module support a where method" do
+    @c.dataset_module{where :released, :released}
+    @c.released.sql.must_equal 'SELECT * FROM items WHERE released'
+    @c.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE (foo AND released)'
+  end
+
+  if Sequel::Model.dataset_module_class == Sequel::Model::DatasetModule
+    it "should have dataset_module not support an eager method" do
+      proc{@c.dataset_module{eager :foo}}.must_raise NoMethodError
+    end
+  end
+
+  it "should have dataset_module support a having method" do
+    @c.dataset_module{having(:released){released}}
+    @c.released.sql.must_equal 'SELECT * FROM items HAVING released'
+    @c.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE foo HAVING released'
+  end
+
+  it "should have dataset_module support an exclude method" do
+    @c.dataset_module{exclude :released, :released}
+    @c.released.sql.must_equal 'SELECT * FROM items WHERE NOT released'
+    @c.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE (foo AND NOT released)'
+  end
+
+  it "should have dataset_module support an exclude_having method" do
+    @c.dataset_module{exclude_having :released, :released}
+    @c.released.sql.must_equal 'SELECT * FROM items HAVING NOT released'
+    @c.where(:foo).released.sql.must_equal 'SELECT * FROM items WHERE foo HAVING NOT released'
+  end
+
+  it "should have dataset_module support a distinct method" do
+    @c.dataset = @c.dataset.with_extend{def supports_distinct_on?; true end}
+    @c.dataset_module{distinct :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT DISTINCT ON (baz) * FROM items'
+    @c.where(:bar).foo.sql.must_equal 'SELECT DISTINCT ON (baz) * FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a grep method" do
+    @c.dataset_module{grep :foo, :baz, 'quux%'}
+    @c.foo.sql.must_equal 'SELECT * FROM items WHERE ((baz LIKE \'quux%\' ESCAPE \'\\\'))'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE (bar AND ((baz LIKE \'quux%\' ESCAPE \'\\\')))'
+  end
+
+  it "should have dataset_module support a group method" do
+    @c.dataset_module{group :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT * FROM items GROUP BY baz'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a group_and_count method" do
+    @c.dataset_module{group_and_count :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT baz, count(*) AS count FROM items GROUP BY baz'
+    @c.where(:bar).foo.sql.must_equal 'SELECT baz, count(*) AS count FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a group_append method" do
+    @c.dataset_module{group_append :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT * FROM items GROUP BY baz'
+    @c.group(:bar).foo.sql.must_equal 'SELECT * FROM items GROUP BY bar, baz'
+  end
+
+  it "should have dataset_module support a limit method" do
+    @c.dataset_module{limit :foo, 1}
+    @c.foo.sql.must_equal 'SELECT * FROM items LIMIT 1'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar LIMIT 1'
+  end
+
+  it "should have dataset_module support a offset method" do
+    @c.dataset_module{offset :foo, 1}
+    @c.foo.sql.must_equal 'SELECT * FROM items OFFSET 1'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar OFFSET 1'
+  end
+
+  it "should have dataset_module support a order method" do
+    @c.dataset_module{order(:foo){:baz}}
+    @c.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar ORDER BY baz'
+  end
+
+  it "should have dataset_module support a order_append method" do
+    @c.dataset_module{order_append :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    @c.order(:bar).foo.sql.must_equal 'SELECT * FROM items ORDER BY bar, baz'
+  end
+
+  it "should have dataset_module support a order_prepend method" do
+    @c.dataset_module{order_prepend :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz'
+    @c.order(:bar).foo.sql.must_equal 'SELECT * FROM items ORDER BY baz, bar'
+  end
+
+  it "should have dataset_module support a reverse method" do
+    @c.dataset_module{reverse(:foo){:baz}}
+    @c.foo.sql.must_equal 'SELECT * FROM items ORDER BY baz DESC'
+    @c.where(:bar).foo.sql.must_equal 'SELECT * FROM items WHERE bar ORDER BY baz DESC'
+  end
+
+  it "should have dataset_module support a select method" do
+    @c.dataset_module{select :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT baz FROM items'
+    @c.where(:bar).foo.sql.must_equal 'SELECT baz FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_all method" do
+    @c.dataset_module{select_all :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT baz.* FROM items'
+    @c.where(:bar).foo.sql.must_equal 'SELECT baz.* FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_append method" do
+    @c.dataset_module{select_append :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT *, baz FROM items'
+    @c.where(:bar).foo.sql.must_equal 'SELECT *, baz FROM items WHERE bar'
+  end
+
+  it "should have dataset_module support a select_group method" do
+    @c.dataset_module{select_group :foo, :baz}
+    @c.foo.sql.must_equal 'SELECT baz FROM items GROUP BY baz'
+    @c.where(:bar).foo.sql.must_equal 'SELECT baz FROM items WHERE bar GROUP BY baz'
+  end
+
+  it "should have dataset_module support a server method" do
+    @c.dataset_module{server :foo, :baz}
+    @c.foo.opts[:server].must_equal :baz
+    @c.where(:bar).foo.opts[:server].must_equal :baz
+  end
+
+  it "should raise error if called with both an argument and a block" do
     proc{@c.dataset_module(Module.new{def return_3() 3 end}){}}.must_raise(Sequel::Error)
   end
 end
@@ -314,6 +396,25 @@ describe "A model inheriting from a model" do
   end
 end
 
+describe "A model inheriting from a custom base that sets @dataset" do
+  before do
+    ::Feline = Class.new(Sequel::Model)
+    def Feline.inherited(subclass)
+      subclass.instance_variable_set(:@dataset, nil)
+      superclass.inherited(subclass)
+    end
+    class ::Leopard < Feline; end
+  end
+  after do
+    Object.send(:remove_const, :Leopard)
+    Object.send(:remove_const, :Feline)
+  end
+
+  it "should not infer the dataset of the subclass" do
+    proc{Leopard.dataset}.must_raise(Sequel::Error)
+  end
+end
+
 describe "Model.primary_key" do
   before do
     @c = Class.new(Sequel::Model)
@@ -333,7 +434,7 @@ describe "Model.primary_key" do
   
   it "should use nil for no primary key" do
     @c.no_primary_key
-    @c.primary_key.must_equal nil
+    @c.primary_key.must_be_nil
   end
 end
 
@@ -392,7 +493,7 @@ describe "Model.db" do
     Sequel::DATABASES.clear
   end
   after do
-    Sequel::Model.instance_variable_get(:@db).must_equal nil
+    Sequel::Model.instance_variable_get(:@db).must_be_nil
     Sequel::DATABASES.replace(@databases)
     Sequel::Model.db = @model_db
   end
@@ -437,58 +538,21 @@ describe "Model.db=" do
   before do
     @db1 = Sequel.mock
     @db2 = Sequel.mock
-    
-    @m = Class.new(Sequel::Model(@db1[:blue].filter(:x=>1)))
+    @m = Class.new(Sequel::Model(@db1))
   end
   
-  it "should affect the underlying dataset" do
+  it "should change database for model" do
     @m.db = @db2
-    
-    @m.dataset.db.must_equal @db2
-    @m.dataset.db.wont_equal @db1
+    @m.db.must_equal @db2
   end
 
-  it "should keep the same dataset options" do
-    @m.db = @db2
-    @m.dataset.sql.must_equal 'SELECT * FROM blue WHERE (x = 1)'
+  it "should raise Error for model with existing dataset" do
+    @m.dataset = :table
+    proc{@m.db = @db2}.must_raise Sequel::Error
   end
 
   it "should use the database for subclasses" do
-    @m.db = @db2
-    Class.new(@m).db.must_equal @db2
-  end
-end
-
-describe Sequel::Model, ".(allowed|restricted)_columns " do
-  before do
-    @c = Class.new(Sequel::Model(:blahblah)) do
-      columns :x, :y, :z
-    end
-    @c.strict_param_setting = false
-    @c.instance_variable_set(:@columns, [:x, :y, :z])
-    DB.reset
-  end
-  
-  it "should set the allowed columns correctly" do
-    @c.allowed_columns.must_equal nil
-    @c.set_allowed_columns :x
-    @c.allowed_columns.must_equal [:x]
-    @c.set_allowed_columns :x, :y
-    @c.allowed_columns.must_equal [:x, :y]
-  end
-
-  it "should only set allowed columns by default" do
-    @c.set_allowed_columns :x, :y
-    i = @c.new(:x => 1, :y => 2, :z => 3)
-    i.values.must_equal(:x => 1, :y => 2)
-    i.set(:x => 4, :y => 5, :z => 6)
-    i.values.must_equal(:x => 4, :y => 5)
-
-    @c.instance_dataset._fetch = @c.dataset._fetch = {:x => 7}
-    i = @c.new
-    i.update(:x => 7, :z => 9)
-    i.values.must_equal(:x => 7)
-    DB.sqls.must_equal ["INSERT INTO blahblah (x) VALUES (7)", "SELECT * FROM blahblah WHERE (id = 10) LIMIT 1"]
+    Class.new(@m).db.must_equal @db1
   end
 end
 
@@ -534,7 +598,6 @@ describe Sequel::Model, ".strict_param_setting" do
   before do
     @c = Class.new(Sequel::Model(:blahblah)) do
       columns :x, :y, :z, :id
-      set_allowed_columns :x, :y
     end
   end
   
@@ -543,30 +606,24 @@ describe Sequel::Model, ".strict_param_setting" do
   end
 
   it "should raise an error if a missing/restricted column/method is accessed" do
-    proc{@c.new(:z=>1)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{@c.create(:z=>1)}.must_raise(Sequel::MassAssignmentRestriction)
+    proc{@c.new(:a=>1)}.must_raise(Sequel::MassAssignmentRestriction)
+    proc{@c.create(:a=>1)}.must_raise(Sequel::MassAssignmentRestriction)
     c = @c.new
-    proc{c.set(:z=>1)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{c.set_all(:use_after_commit_rollback => false)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{c.set_only({:x=>1}, :y)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{c.update(:z=>1)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{c.update_all(:use_after_commit_rollback=>false)}.must_raise(Sequel::MassAssignmentRestriction)
-    proc{c.update_only({:x=>1}, :y)}.must_raise(Sequel::MassAssignmentRestriction)
+    proc{c.set(:a=>1)}.must_raise(Sequel::MassAssignmentRestriction)
+    proc{c.update(:a=>1)}.must_raise(Sequel::MassAssignmentRestriction)
   end
 
   it "should be disabled by strict_param_setting = false" do
     @c.strict_param_setting = false
     @c.strict_param_setting.must_equal false
-    @c.new(:z=>1)
+    @c.new(:a=>1)
   end
 end
 
 describe Sequel::Model, ".require_modification" do
   before do
-    @ds1 = DB[:items]
-    def @ds1.provides_accurate_rows_matched?() false end
-    @ds2 = DB[:items]
-    def @ds2.provides_accurate_rows_matched?() true end
+    @ds1 = DB[:items].with_extend{def provides_accurate_rows_matched?; false end}
+    @ds2 = DB[:items].with_extend{def provides_accurate_rows_matched?; true end}
   end
   after do
     Sequel::Model.require_modification = nil
@@ -591,89 +648,79 @@ end
 describe Sequel::Model, ".[] optimization" do
   before do
     @db = Sequel.mock
-    @db.quote_identifiers = true
     def @db.schema(*) [[:id, {:primary_key=>true}]] end
     def @db.supports_schema_parsing?() true end
     @c = Class.new(Sequel::Model(@db))
+    @ds = @db.dataset.with_quote_identifiers(true)
   end
 
   it "should set simple_pk to the literalized primary key column name if a single primary key" do
     @c.set_primary_key :id
-    @c.simple_pk.must_equal '"id"'
+    @c.simple_pk.must_equal 'id'
     @c.set_primary_key :b
-    @c.simple_pk.must_equal '"b"'
+    @c.simple_pk.must_equal 'b'
     @c.set_primary_key Sequel.identifier(:b__a)
-    @c.simple_pk.must_equal '"b__a"'
+    @c.simple_pk.must_equal 'b__a'
   end
 
   it "should have simple_pk be blank if compound or no primary key" do
     @c.no_primary_key
-    @c.simple_pk.must_equal nil
+    @c.simple_pk.must_be_nil
     @c.set_primary_key [:b, :a]
-    @c.simple_pk.must_equal nil
+    @c.simple_pk.must_be_nil
   end
 
   it "should have simple table set if passed a Symbol to set_dataset" do
     @c.set_dataset :a
-    @c.simple_table.must_equal '"a"'
+    @c.simple_table.must_equal 'a'
     @c.set_dataset :b
-    @c.simple_table.must_equal '"b"'
-    @c.set_dataset :b__a
-    @c.simple_table.must_equal '"b"."a"'
+    @c.simple_table.must_equal 'b'
   end
 
   it "should have simple_table set if passed a simple select all dataset to set_dataset" do
-    @c.set_dataset @db[:a]
+    @c.set_dataset @ds.from(:a)
     @c.simple_table.must_equal '"a"'
-    @c.set_dataset @db[:b]
+    @c.set_dataset @ds.from(:b)
     @c.simple_table.must_equal '"b"'
-    @c.set_dataset @db[:b__a]
+    @c.set_dataset @ds.from(Sequel[:b][:a])
     @c.simple_table.must_equal '"b"."a"'
   end
 
-  it "should have simple_pk and simple_table respect dataset's identifier input methods" do
-    ds = @db[:ab]
-    ds.identifier_input_method = :reverse
-    @c.set_dataset ds
-    @c.simple_table.must_equal '"ba"'
-    @c.set_primary_key :cd
-    @c.simple_pk.must_equal '"dc"'
-
-    @c.set_dataset ds.from(:ef__gh)
-    @c.simple_table.must_equal '"fe"."hg"'
+  with_symbol_splitting "should have simple_table set using qualified symbol" do
+    @c.set_dataset :b__a
+    @c.simple_table.must_equal 'b.a'
+    @c.set_dataset @ds.from(:b__a)
+    @c.simple_table.must_equal '"b"."a"'
   end
 
   it "should have simple_table = nil if passed a non-simple select all dataset to set_dataset" do
     @c.set_dataset @c.db[:a].filter(:active)
-    @c.simple_table.must_equal nil
+    @c.simple_table.must_be_nil
   end
 
   it "should have simple_table inherit superclass's setting" do
-    Class.new(@c).simple_table.must_equal nil
+    Class.new(@c).simple_table.must_be_nil
     @c.set_dataset :a
-    Class.new(@c).simple_table.must_equal '"a"'
+    Class.new(@c).simple_table.must_equal 'a'
   end
 
   it "should use Dataset#with_sql if simple_table and simple_pk are true" do
-    @c.set_dataset :a
-    @c.instance_dataset._fetch = @c.dataset._fetch = {:id => 1}
+    @c.set_dataset @db[:a].with_fetch(:id=>1)
     @c[1].must_equal @c.load(:id=>1)
-    @db.sqls.must_equal ['SELECT * FROM "a" WHERE "id" = 1']
+    @db.sqls.must_equal ['SELECT * FROM a WHERE id = 1']
   end
 
   it "should not use Dataset#with_sql if either simple_table or simple_pk is nil" do
-    @c.set_dataset @db[:a].filter(:active)
-    @c.dataset._fetch = {:id => 1}
+    @c.set_dataset @db[:a].where(:active).with_fetch(:id=>1)
     @c[1].must_equal @c.load(:id=>1)
-    @db.sqls.must_equal ['SELECT * FROM "a" WHERE ("active" AND ("id" = 1)) LIMIT 1']
+    @db.sqls.must_equal ['SELECT * FROM a WHERE (active AND (id = 1)) LIMIT 1']
   end
 end
 
 describe "Model datasets #with_pk with #with_pk!" do
   before do
     @c = Class.new(Sequel::Model(:a))
-    @ds = @c.dataset
-    @ds._fetch = {:id=>1}
+    @ds = @c.dataset = @c.dataset.with_fetch(:id=>1)
     DB.reset
   end
 
@@ -689,6 +736,14 @@ describe "Model datasets #with_pk with #with_pk!" do
     DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
     @ds.with_pk!(1).must_equal @c.load(:id=>1)
     DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
+  end
+
+  it "should work when called repeatedly on a frozen dataset" do
+    @ds.freeze
+    5.times do
+      @ds.with_pk(1).must_equal @c.load(:id=>1)
+      DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
+    end
   end
 
   it "should handle existing filters" do
@@ -708,29 +763,32 @@ describe "Model datasets #with_pk with #with_pk!" do
   it "should handle an array for composite primary keys" do
     @c.set_primary_key [:id1, :id2]
     @ds.with_pk([1, 2])
-    sqls = DB.sqls
-    ["SELECT * FROM a WHERE ((a.id1 = 1) AND (a.id2 = 2)) LIMIT 1",
-    "SELECT * FROM a WHERE ((a.id2 = 2) AND (a.id1 = 1)) LIMIT 1"].must_include(sqls.pop)
-    sqls.must_equal []
+    DB.sqls.must_equal ["SELECT * FROM a WHERE ((a.id1 = 1) AND (a.id2 = 2)) LIMIT 1"]
 
     @ds.with_pk!([1, 2])
-    sqls = DB.sqls
-    ["SELECT * FROM a WHERE ((a.id1 = 1) AND (a.id2 = 2)) LIMIT 1",
-    "SELECT * FROM a WHERE ((a.id2 = 2) AND (a.id1 = 1)) LIMIT 1"].must_include(sqls.pop)
-    sqls.must_equal []
+    DB.sqls.must_equal ["SELECT * FROM a WHERE ((a.id1 = 1) AND (a.id2 = 2)) LIMIT 1"]
+  end
+
+  it "should work with composite primary keys when called repeatedly on a frozen dataset with" do
+    @c.set_primary_key [:id1, :id2]
+    @ds.freeze
+    5.times do
+      @ds.with_pk([1,2])
+      DB.sqls.must_equal ["SELECT * FROM a WHERE ((a.id1 = 1) AND (a.id2 = 2)) LIMIT 1"]
+    end
   end
 
   it "should have with_pk return nil and with_pk! raise if no rows match" do
-    @ds._fetch = []
-    @ds.with_pk(1).must_equal nil
+    @ds = @ds.with_fetch([])
+    @ds.with_pk(1).must_be_nil
     DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
     proc{@ds.with_pk!(1)}.must_raise(Sequel::NoMatchingRow)
     DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
   end
 
   it "should have with_pk return nil and with_pk! raise if no rows match when calling the class method" do
-    @ds._fetch = []
-    @c.with_pk(1).must_equal nil
+    @c.dataset = @c.dataset.with_fetch([])
+    @c.with_pk(1).must_be_nil
     DB.sqls.must_equal ["SELECT * FROM a WHERE id = 1"]
     proc{@c.with_pk!(1)}.must_raise(Sequel::NoMatchingRow)
     DB.sqls.must_equal ["SELECT * FROM a WHERE id = 1"]
@@ -741,9 +799,17 @@ describe "Model datasets #with_pk with #with_pk!" do
     DB.sqls.must_equal ["SELECT * FROM a WHERE (a.id = 1) LIMIT 1"]
   end
 
-  it "should not have #[] consider a string as a primary key lookup" do
-    @ds['foo'].must_equal @c.load(:id=>1)
+  it "should not have #[] consider a literal string as a primary key lookup" do
+    @ds[Sequel.lit('foo')].must_equal @c.load(:id=>1)
     DB.sqls.must_equal ["SELECT * FROM a WHERE (foo) LIMIT 1"]
+  end
+
+  it "should raise Error if called on a dataset with no primary key" do
+    @c.no_primary_key
+    @ds.freeze
+    5.times do
+      proc{@ds.with_pk(1)}.must_raise Sequel::Error
+    end
   end
 end
 
@@ -754,6 +820,7 @@ describe "Model::include" do
     including_class = Class.new(Sequel::Model(:items)) do
       include(mod1, mod2)
     end
-    including_class.included_modules.must_include(mod1, mod2)
+    including_class.included_modules.must_include(mod1)
+    including_class.included_modules.must_include(mod2)
   end
 end

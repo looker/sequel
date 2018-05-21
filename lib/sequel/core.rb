@@ -9,13 +9,16 @@
 #
 #   DB = Sequel.sqlite # Memory database
 #   DB = Sequel.sqlite('blog.db')
-#   DB = Sequel.postgres('database_name', :user=>'user', 
-#          :password=>'password', :host=>'host', :port=>5432, 
-#          :max_connections=>10)
+#   DB = Sequel.postgres('database_name',
+#          user:'user', 
+#          password: 'password',
+#          host: 'host'
+#          port: 5432, 
+#          max_connections: 10)
 #
 # If a block is given to these methods, it is passed the opened Database
 # object, which is closed (disconnected) when the block exits, just
-# like a block passed to connect.  For example:
+# like a block passed to Sequel.connect.  For example:
 #
 #   Sequel.sqlite('blog.db'){|db| puts db[:users].count} 
 #
@@ -24,8 +27,7 @@
 module Sequel
   @convert_two_digit_years = true
   @datetime_class = Time
-
-  # Whether Sequel is being run in single threaded mode
+  @split_symbols = false
   @single_threaded = false
 
   class << self
@@ -42,14 +44,20 @@ module Sequel
     #
     #   Sequel.datetime_class = DateTime
     #
-    # For ruby versions less than 1.9.2, +Time+ has a limited range (1901 to
-    # 2038), so if you use datetimes out of that range, you need to switch
-    # to +DateTime+.  Also, before 1.9.2, +Time+ can only handle local and UTC
-    # times, not other timezones.  Note that +Time+ and +DateTime+ objects
+    # Note that +Time+ and +DateTime+ objects
     # have a different API, and in cases where they implement the same methods,
     # they often implement them differently (e.g. + using seconds on +Time+ and
     # days on +DateTime+).
     attr_accessor :datetime_class
+
+    # Set whether Sequel is being used in single threaded mode. by default,
+    # Sequel uses a thread-safe connection pool, which isn't as fast as the
+    # single threaded connection pool, and also has some additional thread
+    # safety checks.  If your program will only have one thread,
+    # and speed is a priority, you should set this to true:
+    #
+    #   Sequel.single_threaded = true
+    attr_accessor :single_threaded
   end
 
   # Returns true if the passed object could be a specifier of conditions, false otherwise.
@@ -84,11 +92,11 @@ module Sequel
   #   DB = Sequel.connect('sqlite://blog.db') # ./blog.db
   #   DB = Sequel.connect('sqlite:///blog.db') # /blog.db
   #   DB = Sequel.connect('postgres://user:password@host:port/database_name')
-  #   DB = Sequel.connect('sqlite:///blog.db', :max_connections=>10)
+  #   DB = Sequel.connect('sqlite:///blog.db', max_connections: 10)
   #
   # You can also pass a single options hash:
   #
-  #   DB = Sequel.connect(:adapter=>'sqlite', :database=>'./blog.db')
+  #   DB = Sequel.connect(adapter: 'sqlite', database: './blog.db')
   #
   # If a block is given, it is passed the opened +Database+ object, which is
   # closed when the block exits.  For example:
@@ -100,7 +108,7 @@ module Sequel
   # design, and used by <tt>Sequel::Model</tt> to pick the default
   # database.  It is recommended to pass a block if you do not want the
   # resulting Database object to remain in memory until the process
-  # terminates.
+  # terminates, or use the <tt>keep_reference: false</tt> Database option.
   #
   # For details, see the {"Connecting to a Database" guide}[rdoc-ref:doc/opening_databases.rdoc].
   # To set up a master/slave or sharded database connection, see the {"Master/Slave Databases and Sharding" guide}[rdoc-ref:doc/sharding.rdoc].
@@ -126,50 +134,17 @@ module Sequel
   end
 
   # Load all Sequel extensions given.  Extensions are just files that exist under
-  # <tt>sequel/extensions</tt> in the load path, and are just required.  Generally,
-  # extensions modify the behavior of +Database+ and/or +Dataset+, but Sequel ships
-  # with some extensions that modify other classes that exist for backwards compatibility.
+  # <tt>sequel/extensions</tt> in the load path, and are just required.  
   # In some cases, requiring an extension modifies classes directly, and in others,
   # it just loads a module that you can extend other classes with.  Consult the documentation
   # for each extension you plan on using for usage.
   #
-  #   Sequel.extension(:schema_dumper)
-  #   Sequel.extension(:pagination, :query)
+  #   Sequel.extension(:blank)
+  #   Sequel.extension(:core_extensions, :named_timezones)
   def self.extension(*extensions)
     extensions.each{|e| Kernel.require "sequel/extensions/#{e}"}
   end
   
-  # Set the method to call on identifiers going into the database.  This affects
-  # the literalization of identifiers by calling this method on them before they are input.
-  # Sequel upcases identifiers in all SQL strings for most databases, so to turn that off:
-  #
-  #   Sequel.identifier_input_method = nil
-  # 
-  # to downcase instead:
-  #
-  #   Sequel.identifier_input_method = :downcase
-  #
-  # Other String instance methods work as well.
-  def self.identifier_input_method=(value)
-    Database.identifier_input_method = value
-  end
-
-  # Set the method to call on identifiers coming out of the database.  This affects
-  # the literalization of identifiers by calling this method on them when they are
-  # retrieved from the database.  Sequel downcases identifiers retrieved for most
-  # databases, so to turn that off:
-  #
-  #   Sequel.identifier_output_method = nil
-  # 
-  # to upcase instead:
-  #
-  #   Sequel.identifier_output_method = :upcase
-  #
-  # Other String instance methods work as well.
-  def self.identifier_output_method=(value)
-    Database.identifier_output_method = value
-  end
-
   # The exception classed raised if there is an error parsing JSON.
   # This can be overridden to use an alternative json implementation.
   def self.json_parser_error_class
@@ -178,22 +153,14 @@ module Sequel
 
   # Convert given object to json and return the result.
   # This can be overridden to use an alternative json implementation.
-  def self.object_to_json(obj, *args)
-    obj.to_json(*args)
+  def self.object_to_json(obj, *args, &block)
+    obj.to_json(*args, &block)
   end
 
   # Parse the string as JSON and return the result.
   # This can be overridden to use an alternative json implementation.
   def self.parse_json(json)
     JSON.parse(json, :create_additions=>false)
-  end
-
-  # Set whether to quote identifiers for all databases by default. By default,
-  # Sequel quotes identifiers in all SQL strings, so to turn that off:
-  #
-  #   Sequel.quote_identifiers = false
-  def self.quote_identifiers=(value)
-    Database.quote_identifiers = value
   end
 
   # Convert each item in the array to the correct type, handling multi-dimensional
@@ -203,57 +170,86 @@ module Sequel
     array.map do |i|
       if i.is_a?(Array)
         recursive_map(i, converter)
-      elsif i
+      elsif !i.nil?
         converter.call(i)
       end
     end
   end
 
-  # Require all given +files+ which should be in the same or a subdirectory of
-  # this file.  If a +subdir+ is given, assume all +files+ are in that subdir.
-  # This is used to ensure that the files loaded are from the same version of
-  # Sequel as this file.
+  # For backwards compatibility only.  require_relative should be used instead.
   def self.require(files, subdir=nil)
-    Array(files).each{|f| super("#{File.dirname(__FILE__).untaint}/#{"#{subdir}/" if subdir}#{f}")}
+    # Use Kernel.require_relative to work around JRuby 9.0 bug
+    Array(files).each{|f| Kernel.require_relative "#{"#{subdir}/" if subdir}#{f}"}
   end
 
-  # Set whether Sequel is being used in single threaded mode. By default,
-  # Sequel uses a thread-safe connection pool, which isn't as fast as the
-  # single threaded connection pool, and also has some additional thread
-  # safety checks.  If your program will only have one thread,
-  # and speed is a priority, you should set this to true:
-  #
-  #   Sequel.single_threaded = true
-  def self.single_threaded=(value)
-    @single_threaded = value
-    Database.single_threaded = value
-  end
-
-  COLUMN_REF_RE1 = /\A((?:(?!__).)+)__((?:(?!___).)+)___(.+)\z/.freeze
-  COLUMN_REF_RE2 = /\A((?:(?!___).)+)___(.+)\z/.freeze
-  COLUMN_REF_RE3 = /\A((?:(?!__).)+)__(.+)\z/.freeze
   SPLIT_SYMBOL_CACHE = {}
 
-  # Splits the symbol into three parts.  Each part will
-  # either be a string or nil.
+  # Splits the symbol into three parts, if symbol splitting is enabled (not the default).
+  # Each part will either be a string or nil. If symbol splitting
+  # is disabled, returns an array with the first and third parts
+  # being nil, and the second part beind a string version of the symbol.
   #
   # For columns, these parts are the table, column, and alias.
   # For tables, these parts are the schema, table, and alias.
   def self.split_symbol(sym)
     unless v = Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym]}
-      v = case s = sym.to_s
-      when COLUMN_REF_RE1
-        [$1.freeze, $2.freeze, $3.freeze].freeze
-      when COLUMN_REF_RE2
-        [nil, $1.freeze, $2.freeze].freeze
-      when COLUMN_REF_RE3
-        [$1.freeze, $2.freeze, nil].freeze
+      if split_symbols?
+        v = case s = sym.to_s
+        when /\A((?:(?!__).)+)__((?:(?!___).)+)___(.+)\z/
+          [$1.freeze, $2.freeze, $3.freeze].freeze
+        when /\A((?:(?!___).)+)___(.+)\z/
+          [nil, $1.freeze, $2.freeze].freeze
+        when /\A((?:(?!__).)+)__(.+)\z/
+          [$1.freeze, $2.freeze, nil].freeze
+        else
+          [nil, s.freeze, nil].freeze
+        end
       else
-        [nil, s.freeze, nil].freeze
+        v = [nil,sym.to_s.freeze,nil].freeze
       end
       Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym] = v}
     end
     v
+  end
+
+  # Setting this to true enables Sequel's historical behavior of splitting
+  # symbols on double or triple underscores:
+  #
+  #   :table__column         # table.column
+  #   :column___alias        # column AS alias
+  #   :table__column___alias # table.column AS alias
+  #
+  # It is only recommended to turn this on for backwards compatibility until
+  # such symbols have been converted to use newer Sequel APIs such as:
+  #
+  #   Sequel[:table][:column]            # table.column
+  #   Sequel[:column].as(:alias)         # column AS alias
+  #   Sequel[:table][:column].as(:alias) # table.column AS alias
+  #
+  # Sequel::Database instances do their own caching of literalized
+  # symbols, and changing this setting does not affect those caches.  It is
+  # recommended that if you want to change this setting, you do so directly
+  # after requiring Sequel, before creating any Sequel::Database instances.
+  #
+  # Disabling symbol splitting will also disable the handling
+  # of double underscores in virtual row methods, causing such methods to
+  # yield regular identifers instead of qualified identifiers:
+  #
+  #   # Sequel.split_symbols = true
+  #   Sequel.expr{table__column}  # table.column
+  #   Sequel.expr{table[:column]} # table.column
+  #
+  #   # Sequel.split_symbols = false
+  #   Sequel.expr{table__column}  # table__column
+  #   Sequel.expr{table[:column]} # table.column
+  def self.split_symbols=(v)
+    Sequel.synchronize{SPLIT_SYMBOL_CACHE.clear}
+    @split_symbols = v
+  end
+
+  # Whether Sequel currently splits symbols into qualified/aliased identifiers.
+  def self.split_symbols?
+    @split_symbols
   end
 
   # Converts the given +string+ into a +Date+ object.
@@ -301,20 +297,41 @@ module Sequel
   # Unless in single threaded mode, protects access to any mutable
   # global data structure in Sequel.
   # Uses a non-reentrant mutex, so calling code should be careful.
+  # In general, this should only be used around the minimal possible code
+  # such as Hash#[], Hash#[]=, Hash#delete, Array#<<, and Array#delete.
   def self.synchronize(&block)
     @single_threaded ? yield : @data_mutex.synchronize(&block)
   end
 
+  if RUBY_VERSION >= '2.1'
+    # A timer object that can be passed to Sequel.elapsed_seconds_since
+    # to return the number of seconds elapsed.
+    def self.start_timer
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+  else
+    # :nocov:
+    def self.start_timer # :nodoc:
+      Time.now
+    end
+    # :nocov:
+  end
+
+  # The elapsed seconds since the given timer object was created.  The
+  # timer object should have been created via Sequel.start_timer.
+  def self.elapsed_seconds_since(timer)
+    start_timer - timer
+  end
+
   # Uses a transaction on all given databases with the given options. This:
   #
-  #   Sequel.transaction([DB1, DB2, DB3]){...}
+  #   Sequel.transaction([DB1, DB2, DB3]){}
   #
   # is equivalent to:
   #
   #   DB1.transaction do
   #     DB2.transaction do
   #       DB3.transaction do
-  #         ...
   #       end
   #     end
   #   end
@@ -351,7 +368,7 @@ module Sequel
   # <tt>SQL::VirtualRow</tt> instance.
   #
   #   Sequel.virtual_row{a} # Sequel::SQL::Identifier.new(:a)
-  #   Sequel.virtual_row{|o| o.a{}} # Sequel::SQL::Function.new(:a)
+  #   Sequel.virtual_row{|o| o.a} # Sequel::SQL::Function.new(:a)
   def self.virtual_row(&block)
     vr = VIRTUAL_ROW
     case block.arity
@@ -367,7 +384,7 @@ module Sequel
   # Helper method that the database adapter class methods that are added to Sequel via
   # metaprogramming use to parse arguments.
   def self.adapter_method(adapter, *args, &block)
-    options = args.last.is_a?(Hash) ? args.pop : {}
+    options = args.last.is_a?(Hash) ? args.pop : OPTS
     opts = {:adapter => adapter.to_sym}
     opts[:database] = args.shift if args.first.is_a?(String)
     if args.any?
@@ -379,18 +396,33 @@ module Sequel
 
   # Method that adds a database adapter class method to Sequel that calls
   # Sequel.adapter_method.
-  #
-  # Do not call this method with untrusted input, as that can result in
-  # arbitrary code execution.
   def self.def_adapter_method(*adapters) # :nodoc:
     adapters.each do |adapter|
-      instance_eval("def #{adapter}(*args, &block); adapter_method('#{adapter}', *args, &block) end", __FILE__, __LINE__)
+      define_singleton_method(adapter){|*args, &block| adapter_method(adapter, *args, &block)}
     end
   end
 
   private_class_method :adapter_method, :def_adapter_method
 
-  require(%w"deprecated sql connection_pool exceptions dataset database timezones ast_transformer version")
+  require_relative "deprecated"
+  require_relative "sql"
+  require_relative "connection_pool"
+  require_relative "exceptions"
+  require_relative "dataset"
+  require_relative "database"
+  require_relative "timezones"
+  require_relative "ast_transformer"
+  require_relative "version"
+
+  class << self
+    # Allow nicer syntax for creating Sequel expressions:
+    #
+    #   Sequel[1]     # => Sequel::SQL::NumericExpression: 1
+    #   Sequel["a"]   # => Sequel::SQL::StringExpression: 'a'
+    #   Sequel[:a]    # => Sequel::SQL::Identifier: "a"
+    #   Sequel[a: 1]  # => Sequel::SQL::BooleanExpression: ("a" = 1)
+    alias_method :[], :expr
+  end
 
   # Add the database adapter class methods to Sequel via metaprogramming
   def_adapter_method(*Database::ADAPTERS)

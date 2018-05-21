@@ -2,7 +2,7 @@
 
 module Sequel
   module Plugins
-    # The Tree plugin adds additional associations and methods that allow you to 
+    # The tree plugin adds additional associations and methods that allow you to 
     # treat a Model as a tree.  
     #
     # A column for holding the parent key is required and is :parent_id by default.  
@@ -21,7 +21,7 @@ module Sequel
     #   end
     #  
     #   class Node < Sequel::Model
-    #     plugin :tree, :key=>:parentid, :order=>:position
+    #     plugin :tree, key: :parentid, order: :position
     #   end
     module Tree
       # Create parent and children associations.  Any options
@@ -33,15 +33,15 @@ module Sequel
         opts = opts.dup
         opts[:class] = model
 
-        model.instance_eval do
+        model.instance_exec do
           @parent_column = (opts[:key] ||= :parent_id)
           @tree_order = opts[:order]
         end
         
-        par = opts.merge(opts.fetch(:parent, {}))
+        par = opts.merge(opts.fetch(:parent, OPTS))
         parent = par.fetch(:name, :parent)
         
-        chi = opts.merge(opts.fetch(:children, {}))
+        chi = opts.merge(opts.fetch(:children, OPTS))
         children = chi.fetch(:name, :children)
 
         par[:reciprocal] = children
@@ -62,6 +62,13 @@ module Sequel
         attr_accessor :parent_column
 
         Plugins.inherited_instance_variables(self, :@parent_column=>nil, :@tree_order=>nil)
+
+        # Should freeze tree order if it is an array when freezing the model class.
+        def freeze
+          @tree_order.freeze if @tree_order.is_a?(Array)
+        
+          super
+        end
 
         # Returns list of all root nodes (those with no parent nodes).
         #

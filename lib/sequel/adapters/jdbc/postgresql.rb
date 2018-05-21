@@ -1,25 +1,23 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('org.postgresql.Driver', :Postgres)
-Sequel.require 'adapters/shared/postgres'
+require_relative '../shared/postgres'
 
 module Sequel
-  Postgres::CONVERTED_EXCEPTIONS << NativeException
-  
   module JDBC
     Sequel.synchronize do
       DATABASE_SETUP[:postgresql] = proc do |db|
-        db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
         db.dataset_class = Sequel::JDBC::Postgres::Dataset
+        db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
         org.postgresql.Driver
       end
     end
 
-    class TypeConvertor
+    module Postgres
       # Return PostgreSQL array types as ruby Arrays instead of
       # JDBC PostgreSQL driver-specific array type. Only used if the
       # database does not have a conversion proc for the type.
-      def RubyPGArray(r, i)
+      def self.RubyPGArray(r, i)
         if v = r.getArray(i)
           v.array.to_ary
         end
@@ -28,20 +26,13 @@ module Sequel
       # Return PostgreSQL hstore types as ruby Hashes instead of
       # Java HashMaps.  Only used if the database does not have a
       # conversion proc for the type.
-      def RubyPGHstore(r, i)
+      def self.RubyPGHstore(r, i)
         if v = r.getObject(i)
           v.to_hash
         end
       end 
-    end
 
-    # Adapter, Database, and Dataset support for accessing a PostgreSQL
-    # database via JDBC.
-    module Postgres
-      # Methods to add to Database instances that access PostgreSQL via
-      # JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::Postgres::DatabaseMethods
 
         # Add the primary_keys and primary_key_sequences instance variables,
@@ -49,6 +40,12 @@ module Sequel
         def self.extended(db)
           super
           db.send(:initialize_postgres_adapter)
+        end
+
+        # Remove any current entry for the oid in the oid_convertor_map.
+        def add_conversion_proc(oid, *)
+          super
+          Sequel.synchronize{@oid_convertor_map.delete(oid)}
         end
 
         # See Sequel::Postgres::Adapter#copy_into
@@ -62,19 +59,23 @@ module Sequel
             raise Error, "Must provide either a :data option or a block to copy_into"
           end
 
-          synchronize(opts) do |conn|
+          synchronize(opts[:server]) do |conn|
             begin
               copy_manager = org.postgresql.copy.CopyManager.new(conn)
               copier = copy_manager.copy_in(copy_into_sql(table, opts))
               if block_given?
                 while buf = yield
-                  copier.writeToCopy(buf.to_java_bytes, 0, buf.length)
+                  java_bytes = buf.to_java_bytes
+                  copier.writeToCopy(java_bytes, 0, java_bytes.length)
                 end
               else
-                data.each { |d| copier.writeToCopy(d.to_java_bytes, 0, d.length) }
+                data.each do |d|
+                  java_bytes = d.to_java_bytes
+                  copier.writeToCopy(java_bytes, 0, java_bytes.length)
+                end
               end
             rescue Exception => e
-              copier.cancelCopy
+              copier.cancelCopy if copier
               raise
             ensure
               unless e
@@ -106,8 +107,12 @@ module Sequel
                 end
                 b
               end
+            rescue => e
+              raise_error(e, :disconnect=>true)
             ensure
-              raise DatabaseDisconnectError, "disconnecting as a partial COPY may leave the connection in an unusable state" if buf
+              if buf && !e
+                raise DatabaseDisconnectError, "disconnecting as a partial COPY may leave the connection in an unusable state"
+              end
             end
           end
         end
@@ -123,17 +128,16 @@ module Sequel
             else
               false
             end
-             Sequel.synchronize{@oid_convertor_map[oid] = conv}
+            Sequel.synchronize{@oid_convertor_map[oid] = conv}
           end
           conv
         end
 
         private
         
-        # Clear oid convertor map cache when conversion procs are updated.
-        def conversion_procs_updated
-          super
-          Sequel.synchronize{@oid_convertor_map = {}}
+        DATABASE_ERROR_CLASSES = [NativeException].freeze
+        def database_error_classes
+          DATABASE_ERROR_CLASSES
         end
 
         def disconnect_error?(exception, opts)
@@ -145,6 +149,21 @@ module Sequel
         # will override this to add support for specific types.
         def bound_variable_arg(arg, conn)
           nil
+        end
+
+        # Work around issue when using Sequel's bound variable support where the
+        # same SQL is used in different bound variable calls, but the schema has
+        # changed between the calls.  This is necessary as jdbc-postgres versions
+        # after 9.4.1200 violate the JDBC API.  These versions cache separate
+        # PreparedStatement instances, which are eventually prepared server side after the
+        # prepareThreshold is met.  The JDBC API violation is that PreparedStatement#close
+        # does not release the server side prepared statement.
+        def prepare_jdbc_statement(conn, sql, opts)
+          ps = super
+          unless opts[:name]
+            ps.prepare_threshold = 0
+          end
+          ps
         end
 
         # If the given argument is a recognized PostgreSQL-specific type, create
@@ -168,10 +187,10 @@ module Sequel
         end
 
         # Execute the connection configuration SQL queries on the connection.
-        def setup_connection(conn)
-          conn = super(conn)
+        def setup_connection_with_opts(conn, opts)
+          conn = super
           statement(conn) do |stmt|
-            connection_configuration_sqls.each{|sql| log_connection_yield(sql, conn){stmt.execute(sql)}}
+            connection_configuration_sqls(opts).each{|sql| log_connection_yield(sql, conn){stmt.execute(sql)}}
           end
           conn
         end
@@ -179,39 +198,29 @@ module Sequel
         def setup_type_convertor_map
           super
           @oid_convertor_map = {}
-          @type_convertor_map[:RubyPGArray] = TypeConvertor::INSTANCE.method(:RubyPGArray)
-          @type_convertor_map[:RubyPGHstore] = TypeConvertor::INSTANCE.method(:RubyPGHstore)
         end
       end
       
-      # Dataset subclass used for datasets that connect to PostgreSQL via JDBC.
       class Dataset < JDBC::Dataset
         include Sequel::Postgres::DatasetMethods
-        APOS = Dataset::APOS
         
-        # Add the shared PostgreSQL prepared statement methods
-        def prepare(type, name=nil, *values)
-          ps = to_prepared_statement(type, values)
-          ps.extend(JDBC::Dataset::PreparedStatementMethods)
-          ps.extend(::Sequel::Postgres::DatasetMethods::PreparedStatementMethods)
-          if name
-            ps.prepared_statement_name = name
-            db.set_prepared_statement(name, ps)
-          end
-          ps
-        end
-
         private
         
         # Literalize strings similar to the native postgres adapter
         def literal_string_append(sql, v)
-          sql << APOS << db.synchronize(@opts[:server]){|c| c.escape_string(v)} << APOS
+          sql << "'" << db.synchronize(@opts[:server]){|c| c.escape_string(v)} << "'"
+        end
+
+        # SQL fragment for Sequel::SQLTime, containing just the time part
+        def literal_sqltime(v)
+          v.strftime("'%H:%M:%S#{sprintf(".%03d", (v.usec/1000.0).round)}'")
         end
 
         STRING_TYPE = Java::JavaSQL::Types::VARCHAR
         ARRAY_TYPE = Java::JavaSQL::Types::ARRAY
-        PG_SPECIFIC_TYPES = [ARRAY_TYPE, Java::JavaSQL::Types::OTHER, Java::JavaSQL::Types::STRUCT]
-        HSTORE_TYPE = 'hstore'.freeze
+        ARRAY_METHOD = Postgres.method(:RubyPGArray)
+        PG_SPECIFIC_TYPES = [ARRAY_TYPE, Java::JavaSQL::Types::OTHER, Java::JavaSQL::Types::STRUCT].freeze
+        HSTORE_METHOD = Postgres.method(:RubyPGHstore)
 
         def type_convertor(map, meta, type, i)
           case type
@@ -220,11 +229,11 @@ module Sequel
             if pr = db.oid_convertor_proc(oid)
               pr
             elsif type == ARRAY_TYPE
-              map[:RubyPGArray]
+              ARRAY_METHOD
             elsif oid == 2950 # UUID
               map[STRING_TYPE]
-            elsif meta.getPGType(i) == HSTORE_TYPE
-              map[:RubyPGHstore]
+            elsif meta.getPGType(i) == 'hstore'
+              HSTORE_METHOD
             else
               super
             end

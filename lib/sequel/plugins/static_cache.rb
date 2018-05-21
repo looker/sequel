@@ -10,12 +10,12 @@ module Sequel
     # are frozen so they won't be modified unexpectedly, and before hooks disallow
     # saving or destroying instances.
     #
-    # You can use the :frozen=>false option to have this plugin return unfrozen
+    # You can use the frozen: false option to have this plugin return unfrozen
     # instances.  This is slower as it requires creating new objects, but it allows
     # you to make changes to the object and save them.  If you set the option to false,
     # you are responsible for updating the cache manually (the pg_static_cache_updater
     # extension can handle this automatically).  Note that it is not safe to use the
-    # :frozen=>false option if you are mutating column values directly.  If you are
+    # frozen: false option if you are mutating column values directly.  If you are
     # mutating column values, you should also override Model.call to dup each mutable
     # column value to ensure it is not shared by other instances.
     #
@@ -26,6 +26,7 @@ module Sequel
     # * Model.each
     # * Model.count (without an argument or block)
     # * Model.map
+    # * Model.as_hash
     # * Model.to_hash
     # * Model.to_hash_groups
     #
@@ -36,9 +37,9 @@ module Sequel
     #
     #   # Cache the AlbumType class statically, but return unfrozen instances
     #   # that can be modified.
-    #   AlbumType.plugin :static_cache, :frozen=>false
+    #   AlbumType.plugin :static_cache, frozen: false
     #
-    # If you would like the speed benefits of keeping :frozen=>true but still need
+    # If you would like the speed benefits of keeping frozen: true but still need
     # to occasionally update objects, you can side-step the before_ hooks by
     # overriding the class method +static_cache_allow_modifications?+ to return true:
     #
@@ -53,14 +54,13 @@ module Sequel
     # Now if you +#dup+ a Model object (the resulting object is not frozen), you
     # will be able to update and save the duplicate.
     # Note the caveats around your responsibility to update the cache still applies.
-    #
     module StaticCache
       # Populate the static caches when loading the plugin. Options:
       # :frozen :: Whether retrieved model objects are frozen.  The default is true,
       #            for better performance as the shared frozen objects can be used
       #            directly.  If set to false, new instances are created.
       def self.configure(model, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           @static_cache_frozen = opts.fetch(:frozen, true)
           load_cache
         end
@@ -127,41 +127,46 @@ module Sequel
         Plugins.inherited_instance_variables(self, :@static_cache_frozen=>nil)
 
         # Use the cache instead of a query to get the results.
-        def to_hash(key_column = nil, value_column = nil)
-        if key_column.nil? && value_column.nil?
-          if @static_cache_frozen
-            return Hash[cache]
-          else
-            key_column = primary_key
+        def as_hash(key_column = nil, value_column = nil, opts = OPTS)
+          if key_column.nil? && value_column.nil?
+            if @static_cache_frozen && !opts[:hash]
+              return Hash[cache]
+            else
+              key_column = primary_key
+            end
           end
+
+          h = opts[:hash] || {}
+          if value_column
+            if value_column.is_a?(Array)
+              if key_column.is_a?(Array)
+                @all.each{|r| h[r.values.values_at(*key_column)] = r.values.values_at(*value_column)}
+              else
+                @all.each{|r| h[r[key_column]] = r.values.values_at(*value_column)}
+              end
+            else
+              if key_column.is_a?(Array)
+                @all.each{|r| h[r.values.values_at(*key_column)] = r[value_column]}
+              else
+                @all.each{|r| h[r[key_column]] = r[value_column]}
+              end
+            end
+          elsif key_column.is_a?(Array)
+            @all.each{|r| h[r.values.values_at(*key_column)] = static_cache_object(r)}
+          else
+            @all.each{|r| h[r[key_column]] = static_cache_object(r)}
+          end
+          h
         end
 
-        h = {}
-        if value_column
-          if value_column.is_a?(Array)
-            if key_column.is_a?(Array)
-              @all.each{|r| h[r.values.values_at(*key_column)] = r.values.values_at(*value_column)}
-            else
-              @all.each{|r| h[r[key_column]] = r.values.values_at(*value_column)}
-            end
-          else
-            if key_column.is_a?(Array)
-              @all.each{|r| h[r.values.values_at(*key_column)] = r[value_column]}
-            else
-              @all.each{|r| h[r[key_column]] = r[value_column]}
-            end
-          end
-        elsif key_column.is_a?(Array)
-          @all.each{|r| h[r.values.values_at(*key_column)] = static_cache_object(r)}
-        else
-          @all.each{|r| h[r[key_column]] = static_cache_object(r)}
-        end
-        h
+        # Alias of as_hash for backwards compatibility.
+        def to_hash(*a)
+          as_hash(*a)
         end
 
         # Use the cache instead of a query to get the results
-        def to_hash_groups(key_column, value_column = nil)
-          h = {}
+        def to_hash_groups(key_column, value_column = nil, opts = OPTS)
+          h = opts[:hash] || {}
           if value_column
             if value_column.is_a?(Array)
               if key_column.is_a?(Array)
@@ -210,7 +215,7 @@ module Sequel
           @cache = h.freeze
         end
 
-        # If :frozen=>false is not used, just return the argument. Otherwise,
+        # If frozen: false is not used, just return the argument. Otherwise,
         # create a new instance with the arguments values if the argument is
         # not nil.
         def static_cache_object(o)
@@ -223,15 +228,15 @@ module Sequel
       end
 
       module InstanceMethods
-        # Disallowing destroying the object unless the :frozen=>false option was used.
+        # Disallowing destroying the object unless the frozen: false option was used.
         def before_destroy
-          return false unless model.static_cache_allow_modifications?
+          cancel_action("modifying model objects that use the static_cache plugin is not allowed") unless model.static_cache_allow_modifications?
           super
         end
 
-        # Disallowing saving the object unless the :frozen=>false option was used.
+        # Disallowing saving the object unless the frozen: false option was used.
         def before_save
-          return false unless model.static_cache_allow_modifications?
+          cancel_action("modifying model objects that use the static_cache plugin is not allowed") unless model.static_cache_allow_modifications?
           super
         end
       end

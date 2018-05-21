@@ -1,15 +1,13 @@
 # frozen-string-literal: true
 
 require 'sqlite3'
-Sequel.require 'adapters/shared/sqlite'
+require_relative 'shared/sqlite'
 
 module Sequel
-  # Top level module for holding all SQLite-related modules and classes
-  # for Sequel.
   module SQLite
-    TYPE_TRANSLATOR = tt = Class.new do
-      FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
+    FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
 
+    tt = Class.new do
       def blob(s)
         Sequel::SQL::Blob.new(s.to_s)
       end
@@ -58,7 +56,6 @@ module Sequel
           raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
         end
       end
-
     end.new
 
     # Hash with string keys and callable values for converting SQLite types.
@@ -74,9 +71,8 @@ module Sequel
     }.each do |k,v|
       k.each{|n| SQLITE_TYPES[n] = v}
     end
+    SQLITE_TYPES.freeze
     
-    # Database class for SQLite databases used with Sequel and the
-    # ruby-sqlite3 driver.
     class Database < Sequel::Database
       include ::Sequel::SQLite::DatabaseMethods
       
@@ -146,11 +142,15 @@ module Sequel
         end
       end
       
-      # Run the given SQL with the given arguments and return the last inserted row id.
       def execute_insert(sql, opts=OPTS)
         _execute(:insert, sql, opts)
       end
       
+      def freeze
+        @conversion_procs.freeze
+        super
+      end
+
       # Handle Integer and Float arguments, since SQLite can store timestamps as integers and floats.
       def to_application_timestamp(s)
         case s
@@ -181,7 +181,7 @@ module Sequel
             return execute_prepared_statement(conn, type, sql, opts, &block) if sql.is_a?(Symbol)
             log_args = opts[:arguments]
             args = {}
-            opts.fetch(:arguments, {}).each{|k, v| args[k] = prepared_statement_argument(v)}
+            opts.fetch(:arguments, OPTS).each{|k, v| args[k] = prepared_statement_argument(v)}
             case type
             when :select
               log_connection_yield(sql, conn, log_args){conn.query(sql, args, &block)}
@@ -269,17 +269,23 @@ module Sequel
       def database_error_classes
         [SQLite3::Exception, ArgumentError]
       end
+
+      def dataset_class_default
+        Dataset
+      end
+
+      # Support SQLite exception codes if ruby-sqlite3 supports them.
+      # This is disabled by default because ruby-sqlite3 doesn't currently
+      # support them (returning nil), and even if it did, it doesn't support
+      # extended error codes, which would lead to worse behavior.
+      #def sqlite_error_code(exception)
+      #  exception.code if exception.respond_to?(:code)
+      #end
     end
     
-    # Dataset class for SQLite datasets that use the ruby-sqlite3 driver.
     class Dataset < Sequel::Dataset
       include ::Sequel::SQLite::DatasetMethods
 
-      Database::DatasetClass = self
-      
-      PREPARED_ARG_PLACEHOLDER = ':'.freeze
-      
-      # SQLite already supports named bind arguments, so use directly.
       module ArgumentMapper
         include Sequel::Dataset::ArgumentMapper
         
@@ -310,14 +316,6 @@ module Sequel
       BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
       PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
-      # Execute the given type of statement with the hash of values.
-      def call(type, bind_vars={}, *values, &block)
-        ps = to_prepared_statement(type, values)
-        ps.extend(BindArgumentMethods)
-        ps.call(bind_vars, &block)
-      end
-      
-      # Yield a hash for each row in the dataset.
       def fetch_rows(sql)
         execute(sql) do |result|
           i = -1
@@ -339,19 +337,6 @@ module Sequel
         end
       end
       
-      # Prepare the given type of query with the given name and store
-      # it in the database.  Note that a new native prepared statement is
-      # created on each call to this prepared statement.
-      def prepare(type, name=nil, *values)
-        ps = to_prepared_statement(type, values)
-        ps.extend(PreparedStatementMethods)
-        if name
-          ps.prepared_statement_name = name
-          db.set_prepared_statement(name, ps)
-        end
-        ps
-      end
-      
       private
       
       # The base type name for a given type, without any parenthetical part.
@@ -364,9 +349,17 @@ module Sequel
         sql << "'" << ::SQLite3::Database.quote(v) << "'"
       end
 
+      def bound_variable_modules
+        [BindArgumentMethods]
+      end
+
+      def prepared_statement_modules
+        [PreparedStatementMethods]
+      end
+
       # SQLite uses a : before the name of the argument as a placeholder.
       def prepared_arg_placeholder
-        PREPARED_ARG_PLACEHOLDER
+        ':'
       end
     end
   end

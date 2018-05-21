@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "boolean_subsets plugin" do
   before do
@@ -40,7 +40,7 @@ describe "boolean_subsets plugin" do
   end
 
   it "should handle cases where getting the columns raises an error" do
-    @c.meta_def(:columns){raise Sequel::Error}
+    def @c.columns; raise Sequel::Error end
     @c.plugin(:boolean_subsets)
     @c.respond_to?(:active).must_equal false
   end

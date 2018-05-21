@@ -31,32 +31,42 @@ module Sequel
     # The class_table_inheritance plugin assumes that the root table
     # (e.g. employees) has a primary key column (usually autoincrementing),
     # and all other tables have a foreign key of the same name that points
-    # to the same column in their superclass's table.  In this example,
-    # the employees id column is a primary key and the id column in every
-    # other table is a foreign key referencing the employees id.
+    # to the same column in their superclass's table, which is also the primary
+    # key for that table.  In this example, the employees table has an id column
+    # is a primary key and the id column in every other table is a foreign key
+    # referencing employees.id, which is also the primary key of that table.
+    #
+    # Additionally, note that other than the primary key column, no subclass
+    # table has a column with the same name as any superclass table. This plugin
+    # does not support cases where the column names in a subclass table overlap
+    # with any column names in a superclass table.
     #
     # In this example the staff table also stores Cook model objects and the
     # executives table also stores CEO model objects.
     #
     # When using the class_table_inheritance plugin, subclasses that have additional
-    # columns use joined datasets:
+    # columns use joined datasets in subselects:
     #
     #   Employee.dataset.sql
     #   # SELECT * FROM employees
     #
     #   Manager.dataset.sql
-    #   # SELECT employees.id, employees.name, employees.kind,
-    #   #        managers.num_staff
-    #   # FROM employees
-    #   # JOIN managers ON (managers.id = employees.id)
+    #   # SELECT * FROM (
+    #   #   SELECT employees.id, employees.name, employees.kind,
+    #   #          managers.num_staff
+    #   #   FROM employees
+    #   #   JOIN managers ON (managers.id = employees.id)
+    #   # ) AS employees
     #
     #   CEO.dataset.sql
-    #   # SELECT employees.id, employees.name, employees.kind,
-    #   #        managers.num_staff, executives.num_managers
-    #   # FROM employees
-    #   # JOIN managers ON (managers.id = employees.id)
-    #   # JOIN executives ON (executives.id = managers.id)
-    #   # WHERE (employees.kind IN ('CEO'))
+    #   # SELECT * FROM (
+    #   #   SELECT employees.id, employees.name, employees.kind,
+    #   #          managers.num_staff, executives.num_managers
+    #   #   FROM employees
+    #   #   JOIN managers ON (managers.id = employees.id)
+    #   #   JOIN executives ON (executives.id = managers.id)
+    #   #   WHERE (employees.kind IN ('CEO'))
+    #   # ) AS employees
     #
     # This allows CEO.all to return instances with all attributes
     # loaded.  The plugin overrides the deleting, inserting, and updating
@@ -82,26 +92,28 @@ module Sequel
     #
     #   a = Employee.first
     #   a.values # {:id=>1, name=>'S', :kind=>'CEO'}
-    #   a.refresh.values # {:id=>1, name=>'S', :kind=>'Executive', :num_staff=>4, :num_managers=>2}
+    #   a.refresh.values # {:id=>1, name=>'S', :kind=>'CEO', :num_staff=>4, :num_managers=>2}
     #
     # You can also load directly from a subclass:
     #
     #   a = Executive.first
     #   a.values # {:id=>1, name=>'S', :kind=>'Executive', :num_staff=>4, :num_managers=>2}
     #   
-    # Note that when loading from a subclass, because the subclass dataset uses a JOIN,
-    # if you are referencing the primary key column, you need to disambiguate the reference
-    # by explicitly qualifying it:
+    # Note that when loading from a subclass, because the subclass dataset uses a subquery
+    # that by default uses the same alias at the primary table, any qualified identifiers
+    # should reference the subquery alias (and qualified identifiers should not be needed
+    # unless joining to another table):
     #
-    #   a = Executive.where(:id=>1).first # database error
-    #   a = Executive.where(:executives__id=>1).first # no error
+    #   a = Executive.where(:id=>1).first # works
+    #   a = Executive.where{{employees[:id]=>1}}.first # works
+    #   a = Executive.where{{executives[:id]=>1}}.first # doesn't work
     #
     # = Usage
     #
     #   # Use the default of storing the class name in the sti_key
     #   # column (:kind in this case)
     #   class Employee < Sequel::Model
-    #     plugin :class_table_inheritance, :key=>:kind
+    #     plugin :class_table_inheritance, key: :kind
     #   end
     #
     #   # Have subclasses inherit from the appropriate class
@@ -115,21 +127,21 @@ module Sequel
     #
     #   # Specifying the tables with a :table_map hash
     #   Employee.plugin :class_table_inheritance,
-    #     :table_map=>{:Employee  => :employees,
-    #                  :Staff     => :staff,
-    #                  :Cook      => :staff,
-    #                  :Manager   => :managers,
-    #                  :Executive => :executives,
-    #                  :CEO       => :executives }
+    #     table_map: {Employee:  :employees,
+    #                 Staff:     :staff,
+    #                 Cook:      :staff,
+    #                 Manager:   :managers,
+    #                 Executive: :executives,
+    #                 CEO:       :executives }
     #
     #   # Using integers to store the class type, with a :model_map hash
     #   # and an sti_key of :type
-    #   Employee.plugin :class_table_inheritance, :type,
-    #     :model_map=>{1=>:Staff, 2=>:Cook, 3=>:Manager, 4=>:Executive, 5=>:CEO}
+    #   Employee.plugin :class_table_inheritance, key: :type,
+    #     model_map: {1=>:Staff, 2=>:Cook, 3=>:Manager, 4=>:Executive, 5=>:CEO}
     #
     #   # Using non-class name strings
-    #   Employee.plugin :class_table_inheritance, :key=>:type,
-    #     :model_map=>{'staff'=>:Staff, 'cook staff'=>:Cook, 'supervisor'=>:Manager}
+    #   Employee.plugin :class_table_inheritance, key: :type,
+    #     model_map: {'staff'=>:Staff, 'cook staff'=>:Cook, 'supervisor'=>:Manager}
     #
     #   # By default the plugin sets the respective column value
     #   # when a new instance is created.
@@ -138,26 +150,26 @@ module Sequel
     #
     #   # You can customize this behavior with the :key_chooser option.
     #   # This is most useful when using a non-bijective mapping.
-    #   Employee.plugin :class_table_inheritance, :key=>:type,
-    #     :model_map=>{'cook staff'=>:Cook, 'supervisor'=>:Manager},
-    #     :key_chooser=>proc{|instance| instance.model.sti_key_map[instance.model.to_s].first || 'stranger' }
+    #   Employee.plugin :class_table_inheritance, key: :type,
+    #     model_map: {'cook staff'=>:Cook, 'supervisor'=>:Manager},
+    #     key_chooser: proc{|instance| instance.model.sti_key_map[instance.model.to_s].first || 'stranger' }
     #
     #   # Using custom procs, with :model_map taking column values
     #   # and yielding either a class, string, symbol, or nil,
     #   # and :key_map taking a class object and returning the column
     #   # value to use
-    #   Employee.plugin :single_table_inheritance, :key=>:type,
-    #     :model_map=>proc{|v| v.reverse},
-    #     :key_map=>proc{|klass| klass.name.reverse}
+    #   Employee.plugin :single_table_inheritance, key: :type,
+    #     model_map: proc{|v| v.reverse},
+    #     key_map: proc{|klass| klass.name.reverse}
     #
     #   # You can use the same class for multiple values.
     #   # This is mainly useful when the sti_key column contains multiple values
     #   # which are different but do not require different code.
-    #   Employee.plugin :single_table_inheritance, :key=>:type,
-    #     :model_map=>{'staff' => "Staff",
-    #                  'manager' => "Manager",
-    #                  'overpayed staff' => "Staff",
-    #                  'underpayed staff' => "Staff"}
+    #   Employee.plugin :single_table_inheritance, key: :type,
+    #     model_map: {'staff' => "Staff",
+    #                 'manager' => "Manager",
+    #                 'overpayed staff' => "Staff",
+    #                 'underpayed staff' => "Staff"}
     #
     # One minor issue to note is that if you specify the <tt>:key_map</tt>
     # option as a hash, instead of having it inferred from the <tt>:model_map</tt>,
@@ -173,6 +185,8 @@ module Sequel
       end
 
       # Initialize the plugin using the following options:
+      # :alias :: Change the alias used for the subquery in model datasets.
+      #           using this as the alias.
       # :key :: Column symbol that holds the key that identifies the class to use.
       #         Necessary if you want to call model methods on a superclass
       #         that return subclass instances
@@ -180,31 +194,28 @@ module Sequel
       # :key_map :: Hash or proc mapping model class names to key column values.
       #             Each value or return is an array of possible key column values.
       # :key_chooser :: proc returning key for the provided model instance
-      # :table_map :: Hash with class name symbols keys mapping to table name symbol values
-      #               Overrides implicit table names
+      # :table_map :: Hash with class name symbols keys mapping to table name symbol values.
+      #               Overrides implicit table names.
+      # :ignore_subclass_columns :: Array with column names as symbols that are ignored
+      #                             on all sub-classes.
       def self.configure(model, opts = OPTS)
         SingleTableInheritance.configure model, opts[:key], opts
 
-        model.instance_eval do
+        model.instance_exec do
           @cti_models = [self]
           @cti_tables = [table_name]
           @cti_instance_dataset = @instance_dataset
           @cti_table_columns = columns
           @cti_table_map = opts[:table_map] || {}
+          @cti_alias = opts[:alias] || @dataset.first_source
+          @cti_ignore_subclass_columns = opts[:ignore_subclass_columns] || []
         end
       end
 
       module ClassMethods
-        # An array of each model in the inheritance hierarchy that uses an
+        # An array of each model in the inheritance hierarchy that is
         # backed by a new table.
         attr_reader :cti_models
-
-        # The parent/root/base model for this class table inheritance hierarchy.
-        # This is the only model in the hierarchy that loads the
-        # class_table_inheritance plugin. For backwards compatibility.
-        def cti_base_model
-          @cti_models.first
-        end
 
         # An array of column symbols for the backing database table,
         # giving the columns to update in each backing database table.
@@ -215,37 +226,37 @@ module Sequel
         attr_reader :cti_instance_dataset
 
         # An array of table symbols that back this model.  The first is
-        # cti_base_model table symbol, and the last is the current model
+        # table symbol for the base model, and the last is the current model
         # table symbol.
         attr_reader :cti_tables
 
         # A hash with class name symbol keys and table name symbol values.
-        # Specified with the :table_map option to the plugin, and used if
+        # Specified with the :table_map option to the plugin, and should be used if
         # the implicit naming is incorrect.
         attr_reader :cti_table_map
 
-        # Hash with table name symbol keys and arrays of column symbol values,
-        # giving the columns to update in each backing database table.
-        # For backwards compatibility.
-        def cti_columns
-          h = {}
-          cti_models.each { |m| h[m.table_name] = m.cti_table_columns }
-          h
+        # An array of columns that may be duplicated in sub-classes. The
+        # primary key column is always allowed to be duplicated
+        attr_reader :cti_ignore_subclass_columns
+
+        # Freeze CTI information when freezing model class.
+        def freeze
+          @cti_models.freeze
+          @cti_tables.freeze
+          @cti_table_columns.freeze
+          @cti_table_map.freeze
+          @cti_ignore_subclass_columns.freeze
+
+          super
         end
 
-        # Alias to sti_key, for backwards compatibility.
-        def cti_key; sti_key; end
-
-        # Alias to sti_model_map, for backwards compatibility.
-        def cti_model_map; sti_model_map; end
-
-        Plugins.inherited_instance_variables(self, :@cti_models=>nil, :@cti_tables=>nil, :@cti_table_columns=>nil, :@cti_instance_dataset=>nil, :@cti_table_map=>nil)
+        Plugins.inherited_instance_variables(self, :@cti_models=>nil, :@cti_tables=>nil, :@cti_table_columns=>nil, :@cti_instance_dataset=>nil, :@cti_table_map=>nil, :@cti_alias=>nil, :@cti_ignore_subclass_columns=>nil)
 
         def inherited(subclass)
           ds = sti_dataset
 
           # Prevent inherited in model/base.rb from setting the dataset
-          subclass.instance_eval { @dataset = nil }
+          subclass.instance_exec { @dataset = nil }
 
           super
 
@@ -257,25 +268,33 @@ module Sequel
               columns = db.from(table).columns
             else
               table = subclass.implicit_table_name
-              columns = check_non_connection_error{db.from(table).columns}
+              columns = check_non_connection_error(false){db.from(table).columns}
               table = nil if !columns || columns.empty?
             end
           end
-          table = nil if table && (table == table_name)
+          table = nil if table && (table == cti_table_name)
 
           return unless table
 
           pk = primary_key
-          subclass.instance_eval do
+          subclass.instance_exec do
             if cti_tables.length == 1
-              ds = ds.select(*self.columns.map{|cc| Sequel.qualify(table_name, Sequel.identifier(cc))})
+              ds = ds.select(*self.columns.map{|cc| Sequel.qualify(cti_table_name, Sequel.identifier(cc))})
             end
-            sel_app = (columns - [pk]).map{|cc| Sequel.qualify(table, Sequel.identifier(cc))}
-            @sti_dataset = ds.join(table, pk=>pk).select_append(*sel_app)
-            set_dataset(@sti_dataset)
+            cols = (columns - [pk]) - cti_ignore_subclass_columns
+            dup_cols = cols & ds.columns
+            unless dup_cols.empty?
+              raise Error, "class_table_inheritance with duplicate column names (other than the primary key column) is not supported, make sure tables have unique column names (duplicate columns: #{dup_cols}). If this is desired, specify these columns in the :ignore_subclass_columns option when initializing the plugin"
+            end
+            sel_app = cols.map{|cc| Sequel.qualify(table, Sequel.identifier(cc))}
+            @sti_dataset = ds = ds.join(table, pk=>pk).select_append(*sel_app)
+
+            ds = ds.from_self(:alias=>@cti_alias)
+
+            set_dataset(ds)
             set_columns(self.columns)
-            dataset.row_proc = lambda{|r| subclass.sti_load(r)}
-            (columns - [pk]).each{|a| define_lazy_attribute_getter(a, :dataset=>dataset, :table=>table)}
+            @dataset = @dataset.with_row_proc(lambda{|r| subclass.sti_load(r)})
+            cols.each{|a| define_lazy_attribute_getter(a, :dataset=>dataset, :table=>@cti_alias)}
 
             @cti_models += [self]
             @cti_tables += [table]
@@ -290,11 +309,33 @@ module Sequel
 
         # The table name for the current model class's main table.
         def table_name
-          cti_tables ? cti_tables.last : super
+          if cti_tables && cti_tables.length > 1
+            @cti_alias
+          else
+            super
+          end
         end
 
+        # The name of the most recently joined table.
+        def cti_table_name
+          cti_tables ? cti_tables.last : dataset.first_source_alias
+        end
+
+        # The model class for the given key value.
         def sti_class_from_key(key)
           sti_class(sti_model_map[key])
+        end
+
+        private
+
+        # If using a subquery for class table inheritance, also use a subquery
+        # when setting subclass dataset.
+        def sti_subclass_dataset(key)
+          ds = super
+          if cti_models[0] != self
+            ds = ds.from_self(:alias=>@cti_alias)
+          end
+          ds
         end
       end
 
@@ -309,29 +350,34 @@ module Sequel
           self
         end
 
-        private
-
-        def cti_this(model)
-          use_server(model.cti_instance_dataset.filter(model.primary_key_hash(pk)))
+        # Don't allow use of prepared statements.
+        def use_prepared_statements_for?(type)
+          false
         end
 
         # Set the sti_key column based on the sti_key_map.
-        def _before_validation
+        def before_validation
           if new? && (set = self[model.sti_key])
             exp = model.sti_key_chooser.call(self)
             if set != exp
-              set_table = model.sti_class_from_key(set).table_name
-              exp_table = model.sti_class_from_key(exp).table_name
+              set_table = model.sti_class_from_key(set).cti_table_name
+              exp_table = model.sti_class_from_key(exp).cti_table_name
               set_column_value("#{model.sti_key}=", exp) if set_table != exp_table
             end
           end
           super
         end
 
+        private
+
+        def cti_this(model)
+          use_server(model.cti_instance_dataset.where(model.primary_key_hash(pk)))
+        end
+
         # Insert rows into all backing tables, using the columns
         # in each table.
         def _insert
-          return super if model.cti_tables.length == 1
+          return super if model.cti_models[0] == model
           model.cti_models.each do |m|
             v = {}
             m.cti_table_columns.each{|c| v[c] = @values[c] if @values.include?(c)}
@@ -348,10 +394,15 @@ module Sequel
 
         # Update rows in all backing tables, using the columns in each table.
         def _update(columns)
+          return super if model.cti_models[0] == model
           model.cti_models.each do |m|
             h = {}
             m.cti_table_columns.each{|c| h[c] = columns[c] if columns.include?(c)}
-            cti_this(m).update(h) unless h.empty?
+            unless h.empty?
+              ds = cti_this(m)
+              n = ds.update(h)
+              raise(NoExistingObject, "Attempt to update object did not result in a single row modification (SQL: #{ds.update_sql(h)})") if require_modification && n != 1
+            end
           end
         end
       end

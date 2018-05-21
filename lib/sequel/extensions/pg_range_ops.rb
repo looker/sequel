@@ -19,7 +19,7 @@
 # Also, on most Sequel expression objects, you can call the pg_range
 # method:
 #
-#   r = Sequel.expr(:range).pg_range
+#   r = Sequel[:range].pg_range
 #
 # If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
 # or you have loaded the core_refinements extension
@@ -75,13 +75,12 @@ module Sequel
         :starts_after => ["(".freeze, " &> ".freeze, ")".freeze].freeze,
         :adjacent_to => ["(".freeze, " -|- ".freeze, ")".freeze].freeze,
         :overlaps => ["(".freeze, " && ".freeze, ")".freeze].freeze,
-      }
-      FUNCTIONS = %w'lower upper isempty lower_inc upper_inc lower_inf upper_inf'
+      }.freeze
 
-      FUNCTIONS.each do |f|
+      %w'lower upper isempty lower_inc upper_inc lower_inf upper_inf'.each do |f|
         class_eval("def #{f}; function(:#{f}) end", __FILE__, __LINE__)
       end
-      OPERATORS.keys.each do |f|
+      OPERATORS.each_key do |f|
         class_eval("def #{f}(v); operator(:#{f}, v) end", __FILE__, __LINE__)
       end
 

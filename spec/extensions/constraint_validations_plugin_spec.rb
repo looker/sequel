@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::ConstraintValidations" do
   def model_class(opts={})
@@ -19,9 +19,9 @@ describe "Sequel::Plugins::ConstraintValidations" do
     @db = Sequel.mock
     set_fetch({})
     @ds = @db[:items]
-    @ds.instance_variable_set(:@columns, [:name])
+    @ds.send(:columns=, [:name])
     @ds2 = Sequel.mock[:items2]
-    @ds2.instance_variable_set(:@columns, [:name])
+    @ds2.send(:columns=, [:name])
   end
 
   it "should load the validation_helpers plugin into the class" do
@@ -185,6 +185,20 @@ describe "Sequel::Plugins::ConstraintValidations" do
     @c.constraint_validation_reflections.must_equal(:name=>[[:format, {:argument=>/\Afoo\z/i}]])
   end
 
+  it "should handle operator validation" do
+    [[:str_lt, :<], [:str_lte, :<=], [:str_gt, :>], [:str_gte, :>=]].each do |vt, op|
+      model_class(:validation_type=>vt.to_s, :argument=>'a').constraint_validations.must_equal [[:validates_operator, op, 'a', :name]]
+      @c.constraint_validation_reflections.must_equal(:name=>[[:operator, {:operator=>op, :argument=>'a'}]])
+      @c = @c.db.constraint_validations = nil
+    end
+
+    [[:int_lt, :<], [:int_lte, :<=], [:int_gt, :>], [:int_gte, :>=]].each do |vt, op|
+      model_class(:validation_type=>vt.to_s, :argument=>'1').constraint_validations.must_equal [[:validates_operator, op, 1, :name]]
+      @c.constraint_validation_reflections.must_equal(:name=>[[:operator, {:operator=>op, :argument=>1}]])
+      @c = @c.db.constraint_validations = nil
+    end
+  end
+
   it "should handle like validation with % metacharacter" do
     model_class(:validation_type=>'like', :argument=>'%foo%').constraint_validations.must_equal [[:validates_format, /\A.*foo.*\z/, :name]]
     @c.constraint_validation_reflections.must_equal(:name=>[[:format, {:argument=>/\A.*foo.*\z/}]])
@@ -220,7 +234,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
     c.plugin :constraint_validations, :validation_options=>{:unique=>{:message=>'is bad'}}
     c.constraint_validations.must_equal [[:validates_unique, [:name], {:message=>'is bad'}]]
     c.constraint_validation_reflections.must_equal(:name=>[[:unique, {:message=>'is bad'}]])
-    c.dataset._fetch = {:count=>1}
+    c.dataset = c.dataset.with_fetch(:count=>1)
     o = c.new(:name=>'a')
     o.valid?.must_equal false
     o.errors.full_messages.must_equal ['name is bad']
@@ -231,7 +245,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
     c.plugin :constraint_validations, :validation_options=>{:unique=>{:message=>'is bad'}}
     c.constraint_validations.must_equal [[:validates_unique, [:name], {:message=>'is bad', :allow_nil=>true}]]
     c.constraint_validation_reflections.must_equal(:name=>[[:unique, {:message=>'is bad', :allow_nil=>true}]])
-    c.dataset._fetch = {:count=>1}
+    c.dataset = c.dataset.with_fetch(:count=>1)
     o = c.new(:name=>'a')
     o.valid?.must_equal false
     o.errors.full_messages.must_equal ['name is bad']
@@ -244,7 +258,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
     sc.plugin :constraint_validations, :validation_options=>{:unique=>{:allow_missing=>true, :allow_nil=>false}}
     sc.constraint_validations.must_equal [[:validates_unique, [:name], {:message=>'is bad', :allow_missing=>true, :allow_nil=>false}]]
     sc.constraint_validation_reflections.must_equal(:name=>[[:unique, {:message=>'is bad', :allow_missing=>true, :allow_nil=>false}]])
-    sc.dataset._fetch = {:count=>1}
+    sc.dataset = sc.dataset.with_fetch(:count=>1)
     o = sc.new(:name=>'a')
     o.valid?.must_equal false
     o.errors.full_messages.must_equal ['name is bad']
@@ -270,5 +284,17 @@ describe "Sequel::Plugins::ConstraintValidations" do
     c.plugin :constraint_validations
     c.constraint_validations.must_equal [[:validates_presence, :name]]
     c.constraint_validation_reflections.must_equal(:name=>[[:presence, {}]])
+  end
+
+  it "should freeze constraint validations data when freezing model class" do
+    @c = model_class
+    @c.freeze
+    @c.constraint_validations.frozen?.must_equal true
+    @c.constraint_validations.all?(&:frozen?).must_equal true
+    @c.constraint_validation_reflections.frozen?.must_equal true
+    @c.constraint_validation_reflections.values.all?(&:frozen?).must_equal true
+    @c.constraint_validation_reflections.values.all?{|r| r.all?(&:frozen?)}.must_equal true
+    @c.instance_variable_get(:@constraint_validation_options).frozen?.must_equal true
+    @c.instance_variable_get(:@constraint_validation_options).values.all?(&:frozen?).must_equal true
   end
 end

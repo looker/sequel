@@ -32,7 +32,7 @@ module Sequel
       row_count = @opts[:offset_total_count] || ds.clone(:append_sql=>String.new, :placeholder_literal_null=>true).count
       dsa1 = dataset_alias(1)
 
-      if o.is_a?(Symbol) && @opts[:bind_vars] && (match = Sequel::Dataset::PreparedStatementMethods::PLACEHOLDER_RE.match(o.to_s))
+      if o.is_a?(Symbol) && @opts[:bind_vars] && (match = /\A\$(.*)\z/.match(o.to_s))
         # Handle use of bound variable offsets.  Unfortunately, prepared statement
         # bound variable offsets cannot be handled, since the bound variable value
         # isn't available until later.
@@ -45,7 +45,7 @@ module Sequel
       reverse_offset = row_count - o
       ds = if reverse_offset > 0
         ds.limit(reverse_offset).
-          reverse_order(*order).
+          reverse(*order).
           from_self(:alias=>dsa1).
           limit(@opts[:limit]).
           order(*order)

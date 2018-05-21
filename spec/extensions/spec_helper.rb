@@ -1,7 +1,7 @@
-require 'rubygems'
+require_relative "../sequel_warning"
 
 if ENV['COVERAGE']
-  require File.join(File.dirname(File.expand_path(__FILE__)), "../sequel_coverage")
+  require_relative "../sequel_coverage"
   SimpleCov.sequel_coverage(:filter=>%r{lib/sequel/(extensions|plugins)/\w+\.rb\z})
 end
 
@@ -10,12 +10,10 @@ require 'minitest/autorun'
 require 'minitest/hooks/default'
 require 'minitest/shared_description'
 
-unless Object.const_defined?('Sequel') && Sequel.const_defined?('Model')
-  $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
-  require 'sequel'
-end
-Sequel::Deprecation.backtrace_filter = lambda{|line, lineno| lineno < 4 || line =~ /_spec\.rb/}
-SEQUEL_EXTENSIONS_NO_DEPRECATION_WARNING = true
+$:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
+require_relative "../../lib/sequel"
+
+require_relative '../deprecation_helper'
 
 begin
   # Attempt to load ActiveSupport blank extension and inflector first, so Sequel
@@ -27,16 +25,7 @@ rescue LoadError
   nil
 end
 
-Sequel.extension :meta_def
 Sequel.extension :core_refinements if RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby'
-
-def skip_warn(s)
-  warn "Skipping test of #{s}" if ENV["SKIPPED_TEST_WARN"]
-end
-
-Sequel.quote_identifiers = false
-Sequel.identifier_input_method = nil
-Sequel.identifier_output_method = nil
 
 class << Sequel::Model
   attr_writer :db_schema
@@ -44,7 +33,7 @@ class << Sequel::Model
   def columns(*cols)
     return super if cols.empty?
     define_method(:columns){cols}
-    @dataset.instance_variable_set(:@columns, cols) if @dataset
+    @dataset.send(:columns=, cols) if @dataset
     def_column_accessor(*cols)
     @columns = cols
     @db_schema = {}
@@ -52,8 +41,9 @@ class << Sequel::Model
   end
 end
 
+Sequel::DB = nil
 Sequel::Model.use_transactions = false
-Sequel.cache_anonymous_models = false
+Sequel::Model.cache_anonymous_models = false
 
 db = Sequel.mock(:fetch=>{:id => 1, :x => 1}, :numrows=>1, :autoid=>proc{|sql| 10})
 def db.schema(*) [[:id, {:primary_key=>true}]] end

@@ -3,7 +3,7 @@
 # The pg_json_ops extension adds support to Sequel's DSL to make
 # it easier to call PostgreSQL JSON functions and operators (added
 # first in PostgreSQL 9.3).  It also supports the JSONB functions
-# and operators added in PostgreSQL 9.4).
+# and operators added in PostgreSQL 9.4.
 #
 # To load the extension:
 #
@@ -22,10 +22,10 @@
 #  jb = Sequel.pg_jsonb(:jsonb_column)
 #
 # Also, on most Sequel expression objects, you can call the pg_json
-# or pg_jsonb # method:
+# or pg_jsonb method:
 #
-#   j = Sequel.expr(:json_column).pg_json
-#   jb = Sequel.expr(:jsonb_column).pg_jsonb
+#   j = Sequel[:json_column].pg_json
+#   jb = Sequel[:jsonb_column].pg_jsonb
 #
 # If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
 # or you have loaded the core_refinements extension
@@ -61,16 +61,17 @@
 #
 # There are additional methods are are only supported on JSONBOp instances:
 #
-#   j - 1                  # (jsonb_column - 1)
-#   j.concat(:h)           # (jsonb_column || h)
-#   j.contain_all(:a)      # (jsonb_column ?& a)
-#   j.contain_any(:a)      # (jsonb_column ?| a)
-#   j.contains(:h)         # (jsonb_column @> h)
-#   j.contained_by(:h)     # (jsonb_column <@ h)
-#   j.delete_path(%w'0 a') # (jsonb_column #- ARRAY['0','a'])
-#   j.has_key?('a')        # (jsonb_column ? 'a')
-#   j.pretty               # jsonb_pretty(jsonb_column)
-#   j.set(%w'0 a', :h)     # jsonb_set(jsonb_column, ARRAY['0','a'], h, true)
+#   j - 1                     # (jsonb_column - 1)
+#   j.concat(:h)              # (jsonb_column || h)
+#   j.contain_all(:a)         # (jsonb_column ?& a)
+#   j.contain_any(:a)         # (jsonb_column ?| a)
+#   j.contains(:h)            # (jsonb_column @> h)
+#   j.contained_by(:h)        # (jsonb_column <@ h)
+#   j.delete_path(%w'0 a')    # (jsonb_column #- ARRAY['0','a'])
+#   j.has_key?('a')           # (jsonb_column ? 'a')
+#   j.insert(%w'0 a', 'a'=>1) # jsonb_insert(jsonb_column, ARRAY[0, 'a'], '{"a":1}'::jsonb, false)
+#   j.pretty                  # jsonb_pretty(jsonb_column)
+#   j.set(%w'0 a', :h)        # jsonb_set(jsonb_column, ARRAY['0','a'], h, true)
 #
 # If you are also using the pg_json extension, you should load it before
 # loading this extension.  Doing so will allow you to use the #op method on
@@ -336,7 +337,7 @@ module Sequel
         bool_op(CONTAINED_BY, wrap_input_jsonb(other))
       end
 
-      # Check if the other jsonb contains all entries in the receiver:
+      # Removes the given path from the receiver.
       #
       #   jsonb_op.delete_path(:h) # (jsonb #- h)
       def delete_path(other)
@@ -351,19 +352,31 @@ module Sequel
       end
       alias include? has_key?
 
+      # Inserts the given jsonb value at the given path in the receiver.
+      # The default is to insert the value before the given path, but
+      # insert_after can be set to true to insert it after the given path.
+      #
+      #   jsonb_op.insert(['a', 'b'], h) # jsonb_insert(jsonb, ARRAY['a', 'b'], h, false)
+      #   jsonb_op.insert(['a', 'b'], h, true) # jsonb_insert(jsonb, ARRAY['a', 'b'], h, true)
+      def insert(path, other, insert_after=false)
+        self.class.new(function(:insert, wrap_input_array(path), wrap_input_jsonb(other), insert_after))
+      end
+
       # Return the receiver, since it is already a JSONBOp.
       def pg_jsonb
         self
       end
 
-      # Returns a json value for the object at the given path.
+      # Return a pretty printed version of the receiver as a string expression.
       #
       #   jsonb_op.pretty # jsonb_pretty(jsonb)
       def pretty
         Sequel::SQL::StringExpression.new(:NOOP, function(:pretty))
       end
 
-      # Returns a json value for the object at the given path.
+      # Set the given jsonb value at the given path in the receiver.
+      # By default, this will create the value if it does not exist, but
+      # create_missing can be set to false to not create a new value.
       #
       #   jsonb_op.set(['a', 'b'], h) # jsonb_set(jsonb, ARRAY['a', 'b'], h, true)
       #   jsonb_op.set(['a', 'b'], h, false) # jsonb_set(jsonb, ARRAY['a', 'b'], h, false)

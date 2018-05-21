@@ -15,7 +15,7 @@ module Sequel
     # Example:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.where(:id=>pl.arg).exclude(:name=>pl.arg).limit(1)
+    #     ds.where(id: pl.arg).exclude(name: pl.arg).limit(1)
     #   end
     #   loader.first(1, "foo")
     #   # SELECT * FROM items WHERE ((id = 1) AND (name != 'foo')) LIMIT 1
@@ -27,7 +27,7 @@ module Sequel
     # Note that this method does not handle all possible cases.  For example:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.join(pl.arg, :item_id=>:id)
+    #     ds.join(pl.arg, item_id: :id)
     #   end
     #   loader.all(:cart_items)
     #  
@@ -35,7 +35,7 @@ module Sequel
     # best to add a table alias when joining:
     #
     #   loader = Sequel::Dataset::PlaceholderLiteralizer.loader(DB[:items]) do |pl, ds|
-    #     ds.join(Sequel.as(pl.arg, :t), :item_id=>:id)
+    #     ds.join(Sequel.as(pl.arg, :t), item_id: :id)
     #   end
     #   loader.all(:cart_items)
     #
@@ -51,6 +51,7 @@ module Sequel
           @recorder = recorder
           @pos = pos
           @transformer = transformer
+          freeze
         end
 
         # Record the SQL query offset, argument position, and transforming block where the
@@ -106,7 +107,7 @@ module Sequel
         end
 
         # Record the offset at which the argument is used in the SQL query, and any
-        # transforming
+        # transforming block.
         def use(sql, arg, transformer)
           @args << [sql, sql.length, arg, transformer]
         end
@@ -125,13 +126,21 @@ module Sequel
         @fragments = fragments
         @final_sql = final_sql
         @arity = arity
+        freeze
+      end
+
+      # Freeze the fragments and final SQL when freezing the literalizer.
+      def freeze
+        @fragments.freeze
+        @final_sql.freeze
+        super
       end
 
       # Return a new PlaceholderLiteralizer with a modified dataset.  This yields the
       # receiver's dataset to the block, and the block should return the new dataset
       # to use.
       def with_dataset
-        dup.instance_exec{@dataset = yield @dataset; self}
+        dup.instance_exec{@dataset = yield @dataset; self}.freeze
       end
 
       # Return an array of all objects by running the SQL query for the given arguments.

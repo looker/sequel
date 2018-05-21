@@ -25,6 +25,9 @@ module Sequel
     # In the given module +mod+, define methods that are call the same method
     # on the dataset.  This is designed for plugins to define dataset methods
     # inside ClassMethods that call the implementations in DatasetMethods.
+    #
+    # This should not be called with untrusted input or method names that
+    # can't be used literally, since it uses class_eval.
     def self.def_dataset_methods(mod, meths)
       Array(meths).each do |meth|
         mod.class_eval("def #{meth}(*args, &block); dataset.#{meth}(*args, &block) end", __FILE__, __LINE__)
@@ -43,6 +46,7 @@ module Sequel
     def self.after_set_dataset(mod, meth)
       mod.send(:define_method, :set_dataset) do |*a|
         r = super(*a)
+        # Allow calling private class methods as methods this specifies are usually private
         send(meth)
         r
       end

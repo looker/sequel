@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('org.apache.derby.jdbc.EmbeddedDriver', :Derby)
-Sequel.require 'adapters/jdbc/transactions'
+require_relative 'transactions'
 
 module Sequel
   module JDBC
@@ -13,13 +13,8 @@ module Sequel
       end
     end
 
-    # Database and Dataset support for Derby databases accessed via JDBC.
     module Derby
-      # Instance methods for Derby Database objects accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Asql\d+\z/i.freeze
-
         include ::Sequel::JDBC::Transactions
 
         # Derby doesn't support casting integer to varchar, only integer to char,
@@ -30,14 +25,18 @@ module Sequel
           (type == String) ? 'CHAR(254)' : super
         end
 
-        # Derby uses the :derby database type.
         def database_type
           :derby
         end
 
+        def freeze
+          svn_version
+          super
+        end
+
         # Derby uses an IDENTITY sequence for autoincrementing columns.
         def serial_primary_key_options
-          {:primary_key => true, :type => :integer, :identity=>true, :start_with=>1}
+          {:primary_key => true, :type => Integer, :identity=>true, :start_with=>1}
         end
 
         # The SVN version of the database.
@@ -49,7 +48,7 @@ module Sequel
           end
         end
         
-        # Derby supports transaction DDL statements.
+        # Derby supports transactional DDL statements.
         def supports_transactional_ddl?
           true
         end
@@ -62,7 +61,6 @@ module Sequel
           ds.first
         end
     
-        # Derby-specific syntax for renaming columns and changing a columns type/nullity.
         def alter_table_sql(table, op)
           case op[:op]
           when :rename_column
@@ -82,9 +80,15 @@ module Sequel
           end
         end
 
+        # Derby does not allow adding primary key constraints to NULLable columns.
+        def can_add_primary_key_constraint_on_nullable_columns?
+          false
+        end
+
         # Derby doesn't allow specifying NULL for columns, only NOT NULL.
         def column_definition_null_sql(sql, column)
-          sql << " NOT NULL" if column.fetch(:null, column[:allow_null]) == false
+          null = column.fetch(:null, column[:allow_null])
+          sql << " NOT NULL" if null == false || (null.nil? && column[:primary_key])
         end
     
         # Add NOT LOGGED for temporary tables to improve performance.
@@ -149,7 +153,7 @@ module Sequel
 
         # Primary key indexes appear to be named sqlNNNN on Derby
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
+          /\Asql\d+\z/i
         end
 
         # If an :identity option is present in the column, add the necessary IDENTITY SQL.
@@ -172,35 +176,14 @@ module Sequel
           true
         end
 
-        # The SQL query to issue to check if a connection is valid.
         def valid_connection_sql
           @valid_connection_sql ||= select(1).sql
         end
       end
       
-      # Dataset class for Derby datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        PAREN_CLOSE = Dataset::PAREN_CLOSE
-        PAREN_OPEN = Dataset::PAREN_OPEN
-        OFFSET = Dataset::OFFSET
-        CAST_STRING_OPEN = "RTRIM(".freeze
-        BLOB_OPEN = "CAST(X'".freeze
-        BLOB_CLOSE = "' AS BLOB)".freeze
-        HSTAR = "H*".freeze
-        TIME_FORMAT = "'%H:%M:%S'".freeze
-        DEFAULT_FROM = " FROM sysibm.sysdummy1".freeze
-        ROWS = " ROWS".freeze
-        FETCH_FIRST = " FETCH FIRST ".freeze
-        ROWS_ONLY = " ROWS ONLY".freeze
-        BOOL_TRUE_OLD = '(1 = 1)'.freeze
-        BOOL_FALSE_OLD = '(1 = 0)'.freeze
-        BOOL_TRUE = 'TRUE'.freeze
-        BOOL_FALSE = 'FALSE'.freeze
-        EMULATED_FUNCTION_MAP = {:char_length=>'length'.freeze}
-
         # Derby doesn't support an expression between CASE and WHEN,
-        # so remove 
-        # conditions.
+        # so remove conditions.
         def case_expression_sql_append(sql, ce)
           super(sql, ce.with_merged_expression)
         end
@@ -210,9 +193,9 @@ module Sequel
         # a string and the ending whitespace is important.
         def cast_sql_append(sql, expr, type)
           if type == String
-            sql << CAST_STRING_OPEN
+            sql << "RTRIM("
             super
-            sql << PAREN_CLOSE
+            sql << ')'
           else
             super
           end
@@ -224,10 +207,16 @@ module Sequel
             complex_expression_emulate_append(sql, op, args)
           when :&, :|, :^, :<<, :>>
             raise Error, "Derby doesn't support the #{op} operator"
+          when :**
+            sql << 'exp('
+            literal_append(sql, args[1])
+            sql << ' * ln('
+            literal_append(sql, args[0])
+            sql << "))"
           when :extract
-            sql << args.at(0).to_s << PAREN_OPEN
-            literal_append(sql, args.at(1))
-            sql << PAREN_CLOSE
+            sql << args[0].to_s << '('
+            literal_append(sql, args[1])
+            sql << ')'
           else
             super
           end
@@ -251,12 +240,12 @@ module Sequel
         private
 
         def empty_from_sql
-          DEFAULT_FROM
+          " FROM sysibm.sysdummy1"
         end
 
         # Derby needs a hex string casted to BLOB for blobs.
         def literal_blob_append(sql, v)
-          sql << BLOB_OPEN << v.unpack(HSTAR).first << BLOB_CLOSE
+          sql << "CAST(X'" << v.unpack("H*").first << "' AS BLOB)"
         end
 
         # Derby needs the standard workaround to insert all default values into
@@ -265,47 +254,54 @@ module Sequel
           false
         end
 
-        # Derby uses an expression yielding false for false values.
-        # Newer versions can use the FALSE literal, but the latest gem version cannot.
+        # Newer Derby versions can use the FALSE literal, but older versions need an always false expression.
         def literal_false
           if db.svn_version >= 1040133
-            BOOL_FALSE
+            'FALSE'
           else
-            BOOL_FALSE_OLD
+            '(1 = 0)'
           end
         end
 
         # Derby handles fractional seconds in timestamps, but not in times
         def literal_sqltime(v)
-          v.strftime(TIME_FORMAT)
+          v.strftime("'%H:%M:%S'")
         end
 
-        # Derby uses an expression yielding true for true values.
-        # Newer versions can use the TRUE literal, but the latest gem version cannot.
+        # Newer Derby versions can use the TRUE literal, but older versions need an always false expression.
         def literal_true
           if db.svn_version >= 1040133
-            BOOL_TRUE
+            'TRUE'
           else
-            BOOL_TRUE_OLD
+            '(1 = 1)'
           end
         end
 
-        # Derby supports multiple rows in INSERT.
+        # Derby supports multiple rows for VALUES in INSERT.
         def multi_insert_sql_strategy
           :values
+        end
+
+        # Emulate the char_length function with length
+        def native_function_name(emulated_function)
+          if emulated_function == :char_length
+            'length'
+          else
+            super
+          end
         end
 
         # Offset comes before limit in Derby
         def select_limit_sql(sql)
           if o = @opts[:offset]
-            sql << OFFSET
+            sql << " OFFSET "
             literal_append(sql, o)
-            sql << ROWS
+            sql << " ROWS"
           end
           if l = @opts[:limit]
-            sql << FETCH_FIRST
+            sql << " FETCH FIRST "
             literal_append(sql, l)
-            sql << ROWS_ONLY
+            sql << " ROWS ONLY"
           end
         end
       end

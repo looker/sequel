@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "column_conflicts plugin" do
   before do
@@ -39,6 +39,17 @@ describe "column_conflicts plugin" do
     @o.get_column_value(:model).must_equal 2
   end
 
+  it "should not erase existing column conflicts when loading the plugin" do
+    @c.send(:define_method, :foo){raise}
+    @c.send(:define_method, :model=){raise}
+    @c.get_column_conflict!(:foo)
+    @c.set_column_conflict!(:model)
+    @c.plugin :column_conflicts
+    @o.get_column_value(:foo).must_equal 4
+    @o.set_column_value(:model=, 2).must_equal 2
+    @o.get_column_value(:model).must_equal 2
+  end
+
   it "should work correctly in subclasses" do
     @o = Class.new(@c).load(:model=>1, :use_transactions=>2)
     @o.get_column_value(:model).must_equal 1
@@ -50,11 +61,15 @@ describe "column_conflicts plugin" do
   end
 
   it "should work correctly for dataset changes" do
-    ds = @db[:test]
-    def ds.columns; [:object_id] end
-    @c.dataset = ds
+    @c.dataset = @db[:test].with_extend{def columns; [:object_id] end}
     o = @c.load(:object_id=>3)
     o.get_column_value(:object_id).must_equal 3
     o.object_id.wont_equal 3
+  end
+
+  it "should freeze column conflict information when freezing model class" do
+    @c.freeze
+    @c.get_column_conflicts.frozen?.must_equal true
+    @c.set_column_conflicts.frozen?.must_equal true
   end
 end

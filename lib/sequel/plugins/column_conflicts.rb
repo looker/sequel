@@ -29,11 +29,16 @@ module Sequel
     #   # Make the Album class handle column conflicts automatically
     #   Album.plugin :column_conflicts
     module ColumnConflicts
-      # Check for column conflicts on the current model if the model has a dataset.
-      def self.configure(model)
-        model.instance_eval do
+      def self.apply(model)
+        model.instance_exec do
           @get_column_conflicts = {}
           @set_column_conflicts = {}
+        end
+      end
+
+      # Check for column conflicts on the current model if the model has a dataset.
+      def self.configure(model)
+        model.instance_exec do
           check_column_conflicts if @dataset
         end
       end
@@ -58,6 +63,14 @@ module Sequel
           mod = Sequel::Model
           columns.find_all{|c| mod.method_defined?(c)}.each{|c| get_column_conflict!(c)}
           columns.find_all{|c| mod.method_defined?("#{c}=")}.each{|c| set_column_conflict!(c)}
+        end
+
+        # Freeze column conflict information when freezing model class.
+        def freeze
+          @get_column_conflicts.freeze
+          @set_column_conflicts.freeze
+
+          super
         end
 
         # Set the given column as one with a getter method conflict.

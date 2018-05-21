@@ -30,16 +30,16 @@ module Sequel
     module EagerEach 
       module DatasetMethods
         # Don't call #all when attempting to load the columns.
-        def columns
+        def columns!
           if use_eager_all?
-            clone(:all_called=>true).columns
+            clone(:all_called=>true).columns!
           else
             super
           end
         end
 
         # Call #all instead of #each if eager loading,
-        # uless #each is being called by #all.
+        # unless #each is being called by #all.
         def each(&block)
           if use_eager_all?
             all(&block)

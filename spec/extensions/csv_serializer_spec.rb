@@ -1,11 +1,7 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
-begin
-  csv_lib = RUBY_VERSION < '1.9' ? 'fastercsv' : 'csv'
-  require csv_lib
-rescue LoadError => e
-  skip_warn "csv_serializer plugin: can't load #{csv_lib} (#{e.class}: #{e})"
-else
+require 'csv' 
+
 describe "Sequel::Plugins::CsvSerializer" do
   before do
     artist = @Artist = Class.new(Sequel::Model(:artists))
@@ -95,7 +91,7 @@ describe "Sequel::Plugins::CsvSerializer" do
 
     @album = @Album.from_csv('2,AS', :headers=>[nil, 'name'])
     @album.name.must_equal 'AS'
-    @album.artist_id.must_equal nil
+    @album.artist_id.must_be_nil
   end
 
   it "#from_csv should support :headers to specify headers" do
@@ -109,8 +105,10 @@ describe "Sequel::Plugins::CsvSerializer" do
   end
 
   it "should support a to_csv class and dataset method" do
-    @Album.dataset._fetch = {:id=>1, :name=>'RF', :artist_id=>2}
-    @Artist.dataset._fetch = {:id=>2, :name=>'YJM'}
+    @Album.dataset = @Album.dataset.with_fetch(:id=>1, :name=>'RF', :artist_id=>2)
+    @Artist.dataset = @Artist.dataset.with_fetch(:id=>2, :name=>'YJM')
+    @Album.columns(:id, :name, :artist_id)
+    @Album.db_schema.replace(:id=>{:type=>:integer}, :artist_id=>{:type=>:integer})
     @Album.array_from_csv(@Album.to_csv).must_equal [@album]
     @Album.array_from_csv(@Album.dataset.to_csv(:only=>:name), :only=>:name).must_equal [@Album.load(:name=>@album.name)]
   end
@@ -166,9 +164,8 @@ describe "Sequel::Plugins::CsvSerializer" do
   it "should use a dataset's selected columns" do
     columns = [:id]
     ds = @Artist.select(*columns).limit(1)
-    ds.instance_variable_set(:@columns, columns)
-    ds._fetch = [:id => 10]
-    ds.to_csv(:write_headers => true).must_equal "id\n10\n"
+    ds.send(:columns=, columns)
+    ds.with_fetch(:id => 10).to_csv(:write_headers => true).must_equal "id\n10\n"
   end
 
   it "should pass all the examples from the documentation" do
@@ -176,5 +173,11 @@ describe "Sequel::Plugins::CsvSerializer" do
     @album.to_csv(:only=>:name).must_equal "RF\n"
     @album.to_csv(:except=>[:id, :artist_id]).must_equal "RF\n"
   end
-end
+
+  it "should freeze csv serializier opts when model class is frozen" do
+    @Album.csv_serializer_opts[:only] = [:id]
+    @Album.freeze
+    @Album.csv_serializer_opts.frozen?.must_equal true
+    @Album.csv_serializer_opts[:only].frozen?.must_equal true
+  end
 end

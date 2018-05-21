@@ -1,26 +1,13 @@
 # frozen-string-literal: true
 
 module Sequel
-  class Model
-    module InstanceMethods
-      # Whether prepared statements should be used for the given type of query
-      # (:insert, :insert_select, :refresh, :update, or :delete).  True by default,
-      # can be overridden in other plugins to disallow prepared statements for
-      # specific types of queries.
-      def use_prepared_statements_for?(type)
-        true
-      end
-    end
-  end
-
   module Plugins
     # The prepared_statements plugin modifies the model to use prepared statements for
-    # instance level deletes and saves, as well as class level lookups by
-    # primary key.
+    # instance level inserts and updates.
     #
     # Note that this plugin is unsafe in some circumstances, as it can allow up to
     # 2^N prepared statements to be created for each type of insert and update query, where
-    # N is the number of colums in the table. It is recommended that you use the
+    # N is the number of columns in the table. It is recommended that you use the
     # +prepared_statements_safe+ plugin in addition to this plugin to reduce the number
     # of prepared statements that can be created, unless you tightly control how your
     # model instances are saved.
@@ -43,11 +30,11 @@ module Sequel
 
       # Setup the datastructure used to hold the prepared statements in the model.
       def self.apply(model)
-        model.instance_variable_set(:@prepared_statements, :insert=>{}, :insert_select=>{}, :update=>{}, :lookup_sql=>{}, :fixed=>{})
+        model.instance_variable_set(:@prepared_statements, {:insert=>{}, :insert_select=>{}, :update=>{}}.freeze)
       end
 
       module ClassMethods
-        Plugins.inherited_instance_variables(self, :@prepared_statements=>lambda{|v| {:insert=>{}, :insert_select=>{}, :update=>{}, :lookup_sql=>{}, :fixed=>{}}})
+        Plugins.inherited_instance_variables(self, :@prepared_statements=>lambda{|v| {:insert=>{}, :insert_select=>{}, :update=>{}}.freeze})
 
         private
 
@@ -58,7 +45,7 @@ module Sequel
           meth = type == :insert_select ? :returning : :select
           s = ds.opts[meth]
           if f && f.length == 1 && !ds.opts[:join] && (!s || s.empty?)
-            ds = ds.send(meth, *columns.map{|c| Sequel.identifier(c)})
+            ds = ds.public_send(meth, *columns.map{|c| Sequel.identifier(c)})
           end 
           
           prepare_statement(ds, type, vals)
@@ -67,19 +54,12 @@ module Sequel
         # Create a prepared statement based on the given dataset with a unique name for the given
         # type of query and values.
         def prepare_statement(ds, type, vals=OPTS)
-          ps = ds.prepare(type, :"smpsp_#{NEXT.call}", vals)
-          ps.log_sql = true
-          ps
+          ds.clone(:log_sql=>true).prepare(type, :"smpsp_#{NEXT.call}", vals)
         end
 
         # Return a sorted array of columns for use as a hash key.
         def prepared_columns(cols)
-          RUBY_VERSION >= '1.9' ? cols.sort : cols.sort_by(&:to_s)
-        end
-
-        # Return a prepared statement that can be used to delete a row from this model's dataset.
-        def prepared_delete
-          cached_prepared_statement(:fixed, :delete){prepare_statement(filter(prepared_statement_key_array(primary_key)), :delete)}
+          cols.sort
         end
 
         # Return a prepared statement that can be used to insert a row using the given columns.
@@ -93,16 +73,6 @@ module Sequel
           if dataset.supports_insert_select?
             cached_prepared_statement(:insert_select, prepared_columns(cols)){prepare_explicit_statement(naked.clone(:server=>dataset.opts.fetch(:server, :default)), :insert_select, prepared_statement_key_hash(cols))}
           end
-        end
-
-        # Return a prepared statement that can be used to lookup a row solely based on the primary key.
-        def prepared_lookup
-          cached_prepared_statement(:fixed, :lookup){prepare_explicit_statement(filter(prepared_statement_key_array(primary_key)), :first)}
-        end
-
-        # Return a prepared statement that can be used to refresh a row to get new column values after insertion.
-        def prepared_refresh
-          cached_prepared_statement(:fixed, :refresh){prepare_explicit_statement(naked.clone(:server=>dataset.opts.fetch(:server, :default)).filter(prepared_statement_key_array(primary_key)), :first)}
         end
 
         # Return an array of two element arrays with the column symbol as the first entry and the
@@ -129,12 +99,7 @@ module Sequel
 
         # Return a prepared statement that can be used to update row using the given columns.
         def prepared_update(cols)
-          cached_prepared_statement(:update, prepared_columns(cols)){prepare_statement(filter(prepared_statement_key_array(primary_key)), :update, prepared_statement_key_hash(cols))}
-        end
-
-        # Use a prepared statement to query the database for the row matching the given primary key.
-        def primary_key_lookup(pk)
-          prepared_lookup.call(primary_key_hash(pk))
+          cached_prepared_statement(:update, prepared_columns(cols)){prepare_statement(where(prepared_statement_key_array(primary_key)), :update, prepared_statement_key_hash(cols))}
         end
 
         # If a prepared statement has already been cached for the given type and subtype,
@@ -149,24 +114,21 @@ module Sequel
           ps = yield
           Sequel.synchronize{h[subtype] = ps}
         end
+
+        # Whether to use prepared statements for lookups by primary key.  True if the default
+        # primary key lookup isn't optimized.
+        def use_prepared_statements_for_pk_lookup?
+          !@fast_pk_lookup_sql && !dataset.joined_dataset?
+        end
       end
 
       module InstanceMethods
         private
 
-        # Use a prepared statement to delete the row.
-        def _delete_without_checking
-          if use_prepared_statements_for?(:delete)
-            model.send(:prepared_delete).call(pk_hash)
-          else
-            super
-          end
-        end
-
         # Use a prepared statement to insert the values into the model's dataset.
         def _insert_raw(ds)
           if use_prepared_statements_for?(:insert)
-            model.send(:prepared_insert, @values.keys).call(@values)
+            _set_prepared_statement_server(model.send(:prepared_insert, @values.keys)).call(@values)
           else
             super
           end
@@ -177,17 +139,8 @@ module Sequel
         def _insert_select_raw(ds)
           if use_prepared_statements_for?(:insert_select)
             if ps = model.send(:prepared_insert_select, @values.keys)
-              ps.call(@values)
+              _set_prepared_statement_server(ps).call(@values)
             end
-          else
-            super
-          end
-        end
-
-        # Use a prepared statement to refresh this model's column values.
-        def _refresh_get(ds)
-          if use_prepared_statements_for?(:refresh)
-            model.send(:prepared_refresh).call(pk_hash)
           else
             super
           end
@@ -196,9 +149,41 @@ module Sequel
         # Use a prepared statement to update this model's columns in the database.
         def _update_without_checking(columns)
           if use_prepared_statements_for?(:update)
-            model.send(:prepared_update, columns.keys).call(Hash[columns].merge!(pk_hash))
+            _set_prepared_statement_server(model.send(:prepared_update, columns.keys)).call(Hash[columns].merge!(pk_hash))
           else
             super
+          end
+        end
+
+        # If a server is set for the instance, return a prepared statement that will use that server.
+        def _set_prepared_statement_server(ps)
+          if @server
+            ps.server(@server)
+          else
+            ps
+          end
+        end
+
+        # Whether prepared statements should be used for the given type of query
+        # (:insert, :insert_select, :update).  True by default,
+        # can be overridden in other plugins to disallow prepared statements for
+        # specific types of queries.
+        def use_prepared_statements_for?(type)
+          if defined?(super)
+            result = super
+            return result unless result.nil?
+          end
+
+          case type
+          when :insert, :insert_select, :update
+            true
+          # :nocov:
+          when :delete, :refresh
+            Sequel::Deprecation.deprecate("The :delete and :refresh prepared statement types", "There should be no need to check if these types are supported")
+            false
+          # :nocov:
+          else
+            raise Error, "unsupported type used: #{type.inspect}"
           end
         end
       end

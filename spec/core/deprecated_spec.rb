@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
+require_relative "spec_helper"
 
 describe "Sequel::Deprecated" do
   before do
@@ -27,7 +27,7 @@ describe "Sequel::Deprecated" do
 
   it "should consider two arguments to be a method name and additional text" do
     @d.deprecate("foo", "Use bar instead")
-    @output.must_equal ['foo is deprecated and will be removed in a future version of Sequel.  Use bar instead.']
+    @output.must_equal ['foo is deprecated and will be removed in Sequel 5.1.  Use bar instead.']
   end
 
   it "should include a prefix if set" do

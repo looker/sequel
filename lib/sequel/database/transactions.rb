@@ -9,21 +9,10 @@ module Sequel
     # them do.
     # ---------------------
 
-    SQL_BEGIN = 'BEGIN'.freeze
-    SQL_COMMIT = 'COMMIT'.freeze
-    SQL_RELEASE_SAVEPOINT = 'RELEASE SAVEPOINT autopoint_%d'.freeze
-    SQL_ROLLBACK = 'ROLLBACK'.freeze
-    SQL_ROLLBACK_TO_SAVEPOINT = 'ROLLBACK TO SAVEPOINT autopoint_%d'.freeze
-    SQL_SAVEPOINT = 'SAVEPOINT autopoint_%d'.freeze
-    
-    TRANSACTION_BEGIN = 'Transaction.begin'.freeze
-    TRANSACTION_COMMIT = 'Transaction.commit'.freeze
-    TRANSACTION_ROLLBACK = 'Transaction.rollback'.freeze
-
     TRANSACTION_ISOLATION_LEVELS = {:uncommitted=>'READ UNCOMMITTED'.freeze,
       :committed=>'READ COMMITTED'.freeze,
       :repeatable=>'REPEATABLE READ'.freeze,
-      :serializable=>'SERIALIZABLE'.freeze}
+      :serializable=>'SERIALIZABLE'.freeze}.freeze
     
     # The default transaction isolation level for this database,
     # used for all future transactions.  For MSSQL, this should be set
@@ -31,6 +20,58 @@ module Sequel
     # Database#transaction, as on MSSQL if affects all future transactions
     # on the same connection.
     attr_accessor :transaction_isolation_level
+
+    # If a transaction is not currently in process, yield to the block immediately.
+    # Otherwise, add the block to the list of blocks to call after the currently
+    # in progress transaction commits (and only if it commits).
+    # Options:
+    # :server :: The server/shard to use.
+    def after_commit(opts=OPTS, &block)
+      raise Error, "must provide block to after_commit" unless block
+      synchronize(opts[:server]) do |conn|
+        if h = _trans(conn)
+          raise Error, "cannot call after_commit in a prepared transaction" if h[:prepare]
+          add_transaction_hook(conn, :after_commit, block)
+        else
+          yield
+        end
+      end
+    end
+    
+    # If a transaction is not currently in progress, ignore the block.
+    # Otherwise, add the block to the list of the blocks to call after the currently
+    # in progress transaction rolls back (and only if it rolls back).
+    # Options:
+    # :server :: The server/shard to use.
+    def after_rollback(opts=OPTS, &block)
+      raise Error, "must provide block to after_rollback" unless block
+      synchronize(opts[:server]) do |conn|
+        if h = _trans(conn)
+          raise Error, "cannot call after_rollback in a prepared transaction" if h[:prepare]
+          add_transaction_hook(conn, :after_rollback, block)
+        end
+      end
+    end
+    
+    # Return true if already in a transaction given the options,
+    # false otherwise.  Respects the :server option for selecting
+    # a shard.
+    def in_transaction?(opts=OPTS)
+      synchronize(opts[:server]){|conn| !!_trans(conn)}
+    end
+
+    # Returns a proc that you can call to check if the transaction
+    # has been rolled back.  The proc will return nil if the
+    # transaction is still in progress, true if the transaction was
+    # rolled back, and false if it was committed.  Raises an
+    # Error if called outside a transaction.  Respects the :server
+    # option for selecting a shard.
+    def rollback_checker(opts=OPTS)
+      synchronize(opts[:server]) do |conn|
+        raise Error, "not in a transaction" unless t = _trans(conn)
+        t[:rollback_checker] ||= proc{Sequel.synchronize{t[:rolled_back]}}
+      end
+    end
 
     # Starts a database transaction.  When a database transaction is used,
     # either all statements are successful or none of the statements are
@@ -70,7 +111,7 @@ module Sequel
     #               use a savepoint you must use this option.  If the surrounding transaction
     #               uses :auto_savepoint, you can set this to false to not use a savepoint.
     #               If the value given for this option is :only, it will only create a
-    #               savepoint if it is inside a transacation.
+    #               savepoint if it is inside a transaction.
     #
     # PostgreSQL specific options:
     #
@@ -165,9 +206,10 @@ module Sequel
       rescue Exception => e
         begin
           rollback_transaction(conn, opts)
-        rescue Exception
+        rescue Exception => e3
         end
         transaction_error(e, :conn=>conn, :rollback=>rollback)
+        raise e3 if e3
         ret
       ensure
         begin
@@ -215,7 +257,14 @@ module Sequel
       Sequel.synchronize{@transactions[conn] = hash}
     end    
 
-    # Whether the current thread/connection is already inside a transaction
+    # Set the given callable as a hook to be called. Type should be either
+    # :after_commit or :after_rollback.
+    def add_transaction_hook(conn, type, block)
+      hooks = _trans(conn)[type] ||= []
+      hooks << block
+    end
+
+    # Whether the given connection is already inside a transaction
     def already_in_transaction?(conn, opts)
       _trans(conn) && (!supports_savepoints? || !opts[:savepoint])
     end
@@ -233,10 +282,10 @@ module Sequel
 
     # SQL to start a new savepoint
     def begin_savepoint_sql(depth)
-      SQL_SAVEPOINT % depth
+      "SAVEPOINT autopoint_#{depth}"
     end
 
-    # Start a new database connection on the given connection
+    # Start a new database transaction on the given connection
     def begin_new_transaction(conn, opts)
       log_connection_execute(conn, begin_transaction_sql)
       set_transaction_isolation(conn, opts)
@@ -257,13 +306,13 @@ module Sequel
     
     # SQL to BEGIN a transaction.
     def begin_transaction_sql
-      SQL_BEGIN
+      'BEGIN'
     end
 
     # Whether to commit the current transaction. Thread.current.status is
     # checked because Thread#kill skips rescue blocks (so exception would be
     # nil), but the transaction should still be rolled back. On Ruby 1.9 (but
-    # not 1.8 or 2.0), the thread status will still be "run", so Thread#kill
+    # not 2.0+), the thread status will still be "run", so Thread#kill
     # will erroneously commit the transaction, and there isn't a workaround.
     def commit_or_rollback_transaction(exception, conn, opts)
       if exception
@@ -281,7 +330,7 @@ module Sequel
     
     # SQL to commit a savepoint
     def commit_savepoint_sql(depth)
-      SQL_RELEASE_SAVEPOINT % depth
+      "RELEASE SAVEPOINT autopoint_#{depth}"
     end
 
     # Commit the active transaction on the connection
@@ -296,13 +345,18 @@ module Sequel
 
     # SQL to COMMIT a transaction.
     def commit_transaction_sql
-      SQL_COMMIT
+      'COMMIT'
     end
     
     # Method called on the connection object to execute SQL on the database,
     # used by the transaction code.
     def connection_execute_method
       :execute
+    end
+
+    # Which transaction errors to translate, blank by default.
+    def database_error_classes
+      []
     end
 
     # Retrieve the transaction hooks that should be run for the given
@@ -318,6 +372,9 @@ module Sequel
       callbacks = transaction_hooks(conn, committed)
 
       if transaction_finished?(conn)
+        h = @transactions[conn]
+        rolled_back = !committed
+        Sequel.synchronize{h[:rolled_back] = rolled_back}
         Sequel.synchronize{@transactions.delete(conn)}
       end
 
@@ -326,7 +383,7 @@ module Sequel
 
     # SQL to rollback to a savepoint
     def rollback_savepoint_sql(depth)
-      SQL_ROLLBACK_TO_SAVEPOINT % depth
+      "ROLLBACK TO SAVEPOINT autopoint_#{depth}"
     end
 
     # Rollback the active transaction on the connection
@@ -341,7 +398,7 @@ module Sequel
 
     # SQL to ROLLBACK a transaction.
     def rollback_transaction_sql
-      SQL_ROLLBACK
+      'ROLLBACK'
     end
     
     # Set the transaction isolation level on the given connection

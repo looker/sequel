@@ -26,14 +26,6 @@ module Sequel
       :time=>Sequel::SQLTime, :boolean=>[TrueClass, FalseClass].freeze, :float=>Float, :decimal=>BigDecimal,
       :blob=>Sequel::SQL::Blob}.freeze
 
-    # Module to be included in shared adapters so that when the DatabaseMethods are
-    # included in the database, the identifier mangling defaults are reset correctly.
-    module ResetIdentifierMangling
-      def extended(obj)
-        obj.send(:reset_identifier_mangling)
-      end
-    end
-
     # Nested hook Proc; each new hook Proc just wraps the previous one.
     @initialize_hook = Proc.new {|db| }
 
@@ -84,7 +76,7 @@ module Sequel
         :user => uri.user,
         :password => uri.password,
         :port => uri.port,
-        :host => RUBY_VERSION < '1.9.3' ? uri.host : uri.hostname,
+        :host => uri.hostname,
         :database => (m = /\/(.*)/.match(uri.path)) && (m[1])
       }
     end
@@ -103,13 +95,16 @@ module Sequel
     # options hash.
     #
     # Accepts the following options:
+    # :cache_schema :: Whether schema should be cached for this Database instance
     # :default_string_column_size :: The default size of string columns, 255 by default.
-    # :identifier_input_method :: A string method symbol to call on identifiers going into the database.
-    # :identifier_output_method :: A string method symbol to call on identifiers coming from the database.
+    # :keep_reference :: Whether to keep a reference to this instance in Sequel::DATABASES, true by default.
     # :logger :: A specific logger to use.
     # :loggers :: An array of loggers to use.
+    # :log_connection_info :: Whether connection information should be logged when logging queries.
+    # :log_warn_duration :: The number of elapsed seconds after which queries should be logged at warn level.
     # :name :: A name to use for the Database object.
-    # :preconnect :: Whether to automatically connect to the maximum number of servers.
+    # :preconnect :: Whether to automatically connect to the maximum number of servers.  Can use a valid
+    #                of 'concurrently' to preconnect in separate threads.
     # :quote_identifiers :: Whether to quote identifiers.
     # :servers :: A hash specifying a server/shard specific options, keyed by shard symbol .
     # :single_threaded :: Whether to use a single-threaded connection pool.
@@ -123,7 +118,7 @@ module Sequel
       @opts[:servers] = {} if @opts[:servers].is_a?(String)
       @sharded = !!@opts[:servers]
       @opts[:adapter_class] = self.class
-      @opts[:single_threaded] = @single_threaded = typecast_value_boolean(@opts.fetch(:single_threaded, Database.single_threaded))
+      @opts[:single_threaded] = @single_threaded = typecast_value_boolean(@opts.fetch(:single_threaded, Sequel.single_threaded))
       @default_string_column_size = @opts[:default_string_column_size] || DEFAULT_STRING_COLUMN_SIZE
 
       @schemas = {}
@@ -131,14 +126,12 @@ module Sequel
       @transactions = {}
       @symbol_literal_cache = {}
 
-      @identifier_input_method = nil
-      @identifier_output_method = nil
-      @quote_identifiers = nil
       @timezone = nil
 
       @dataset_class = dataset_class_default
       @cache_schema = typecast_value_boolean(@opts.fetch(:cache_schema, true))
       @dataset_modules = []
+      @loaded_extensions = []
       @schema_type_classes = SCHEMA_TYPE_CLASSES.dup
 
       self.sql_log_level = @opts[:sql_log_level] ? @opts[:sql_log_level].to_sym : :info
@@ -147,7 +140,7 @@ module Sequel
 
       @pool = ConnectionPool.get_pool(self, @opts)
 
-      reset_identifier_mangling
+      reset_default_dataset
       adapter_initialize
 
       unless typecast_value_boolean(@opts[:keep_reference]) == false
@@ -158,44 +151,46 @@ module Sequel
         concurrent = typecast_value_string(@opts[:preconnect]) == "concurrently"
         @pool.send(:preconnect, concurrent)
       end
+
+      case exts = @opts[:extensions]
+      when String
+        extension(*exts.split(',').map(&:to_sym))
+      when Array
+        extension(*exts)
+      when Symbol
+        extension(exts)
+      when nil
+        # nothing
+      else
+        raise Error, "unsupported Database :extensions option: #{@opts[:extensions].inspect}"
+      end
     end
 
-    # If a transaction is not currently in process, yield to the block immediately.
-    # Otherwise, add the block to the list of blocks to call after the currently
-    # in progress transaction commits (and only if it commits).
-    # Options:
-    # :server :: The server/shard to use.
-    def after_commit(opts=OPTS, &block)
-      raise Error, "must provide block to after_commit" unless block
-      synchronize(opts[:server]) do |conn|
-        if h = _trans(conn)
-          raise Error, "cannot call after_commit in a prepared transaction" if h[:prepare]
-          add_transaction_hook(conn, :after_commit, block)
-        else
-          yield
-        end
-      end
+    # Freeze internal data structures for the Database instance.
+    def freeze
+      valid_connection_sql
+      metadata_dataset
+      @opts.freeze
+      @loggers.freeze
+      @pool.freeze
+      @dataset_class.freeze
+      @dataset_modules.freeze
+      @schema_type_classes.freeze
+      @loaded_extensions.freeze
+      metadata_dataset
+      super
     end
-    
-    # If a transaction is not currently in progress, ignore the block.
-    # Otherwise, add the block to the list of the blocks to call after the currently
-    # in progress transaction rolls back (and only if it rolls back).
-    # Options:
-    # :server :: The server/shard to use.
-    def after_rollback(opts=OPTS, &block)
-      raise Error, "must provide block to after_rollback" unless block
-      synchronize(opts[:server]) do |conn|
-        if h = _trans(conn)
-          raise Error, "cannot call after_rollback in a prepared transaction" if h[:prepare]
-          add_transaction_hook(conn, :after_rollback, block)
-        end
-      end
+
+    # Disallow dup/clone for Database instances
+    undef_method :dup, :clone, :initialize_copy
+    if RUBY_VERSION >= '1.9.3'
+      undef_method :initialize_clone, :initialize_dup
     end
-    
+
     # Cast the given type to a literal type
     #
     #   DB.cast_type_literal(Float) # double precision
-    #   DB.cast_type_literal(:foo) # foo
+    #   DB.cast_type_literal(:foo)  # foo
     def cast_type_literal(type)
       type_literal(:type=>type)
     end
@@ -209,7 +204,10 @@ module Sequel
       Sequel.extension(*exts)
       exts.each do |ext|
         if pr = Sequel.synchronize{EXTENSIONS[ext]}
-          pr.call(self)
+          unless Sequel.synchronize{@loaded_extensions.include?(ext)}
+            Sequel.synchronize{@loaded_extensions << ext}
+            pr.call(self)
+          end
         else
           raise(Error, "Extension #{ext} does not have specific support handling individual databases (try: Sequel.extension #{ext.inspect})")
         end
@@ -222,13 +220,6 @@ module Sequel
     # the database does not have a timezone.
     def from_application_timestamp(v)
       Sequel.convert_output_timestamp(v, timezone)
-    end
-
-    # Return true if already in a transaction given the options,
-    # false otherwise.  Respects the :server option for selecting
-    # a shard.
-    def in_transaction?(opts=OPTS)
-      synchronize(opts[:server]){|conn| !!_trans(conn)}
     end
 
     # Returns a string representation of the database object including the
@@ -244,8 +235,8 @@ module Sequel
 
     # Proxy the literal call to the dataset.
     #
-    #   DB.literal(1) # 1
-    #   DB.literal(:a) # a
+    #   DB.literal(1)   # 1
+    #   DB.literal(:a)  # a
     #   DB.literal('a') # 'a'
     def literal(v)
       schema_utility_dataset.literal(v)
@@ -279,15 +270,13 @@ module Sequel
       @schema_type_classes[type]
     end
     
-    # Default serial primary key options, used by the table creation
-    # code.
+    # Default serial primary key options, used by the table creation code.
     def serial_primary_key_options
       {:primary_key => true, :type => Integer, :auto_increment => true}
     end
 
     # Cache the prepared statement object at the given name.
     def set_prepared_statement(name, ps)
-      ps.prepared_sql
       Sequel.synchronize{prepared_statements[name] = ps}
     end
 
@@ -318,6 +307,7 @@ module Sequel
       return nil if value.nil?
       meth = "typecast_value_#{column_type}"
       begin
+        # Allow calling private methods as per-type typecasting methods are private
         respond_to?(meth, true) ? send(meth, value) : value
       rescue ArgumentError, TypeError => e
         raise Sequel.convert_exception_class(e, InvalidValue)
@@ -341,13 +331,6 @@ module Sequel
     def adapter_initialize
     end
 
-    # Set the given callable as a hook to be called. Type should be either
-    # :after_commit or :after_rollback.
-    def add_transaction_hook(conn, type, block)
-      hooks = _trans(conn)[type] ||= []
-      hooks << block
-    end
-
     # Returns true when the object is considered blank.
     # The only objects that are blank are nil, false,
     # strings with all whitespace, and ones that respond
@@ -366,11 +349,6 @@ module Sequel
       end
     end
 
-    # Which transaction errors to translate, blank by default.
-    def database_error_classes
-      []
-    end
-
     # An enumerable yielding pairs of regexps and exception classes, used
     # to match against underlying driver exception messages in
     # order to raise a more specific Sequel::DatabaseError subclass.
@@ -384,8 +362,7 @@ module Sequel
       database_specific_error_class(exception, opts) || DatabaseError
     end
     
-    # Return the SQLState for the given exception, if one can be
-    # determined
+    # Return the SQLState for the given exception, if one can be determined
     def database_exception_sqlstate(exception, opts)
       nil
     end
@@ -436,7 +413,7 @@ module Sequel
     end
     
     # Convert the given exception to an appropriate Sequel::DatabaseError
-    # subclass, keeping message and traceback.
+    # subclass, keeping message and backtrace.
     def raise_error(exception, opts=OPTS)
       if !opts[:classes] || Array(opts[:classes]).any?{|c| exception.is_a?(c)}
         raise Sequel.convert_exception_class(exception, database_error_class(exception, opts))
@@ -480,15 +457,15 @@ module Sequel
     def typecast_value_datetime(value)
       Sequel.typecast_to_application_timestamp(value)
     end
-
-    # Typecast the value to a BigDecimal
-    def typecast_value_decimal(value)
-      case value
-      when BigDecimal
-        value
-      when Numeric
-        BigDecimal.new(value.to_s)
-      when String
+    
+    if RUBY_VERSION >= '2.4'
+      # Typecast a string to a BigDecimal
+      def _typecast_value_string_to_decimal(value)
+        BigDecimal.new(value)
+      end
+    else
+      # :nocov:
+      def _typecast_value_string_to_decimal(value)
         d = BigDecimal.new(value)
         if d.zero?
           # BigDecimal parsing is loose by default, returning a 0 value for
@@ -501,6 +478,19 @@ module Sequel
           end
         end
         d
+      end
+      # :nocov:
+    end
+
+    # Typecast the value to a BigDecimal
+    def typecast_value_decimal(value)
+      case value
+      when BigDecimal
+        value
+      when Numeric
+        BigDecimal.new(value.to_s)
+      when String
+        _typecast_value_string_to_decimal(value)
       else
         raise InvalidValue, "invalid value for BigDecimal: #{value.inspect}"
       end
@@ -511,23 +501,9 @@ module Sequel
       Float(value)
     end
 
-    # Used for checking/removing leading zeroes from strings so they don't get
-    # interpreted as octal.
-    LEADING_ZERO_RE = /\A0+(\d)/.freeze
-    if RUBY_VERSION >= '1.9'
-      # Typecast the value to an Integer
-      def typecast_value_integer(value)
-        (value.is_a?(String) && value =~ LEADING_ZERO_RE) ? Integer(value, 10) : Integer(value)
-      end
-    else
-    # :nocov:
-      # Replacement string when replacing leading zeroes.
-      LEADING_ZERO_REP = "\\1".freeze 
-      # Typecast the value to an Integer
-      def typecast_value_integer(value)
-        Integer(value.is_a?(String) ? value.sub(LEADING_ZERO_RE, LEADING_ZERO_REP) : value)
-      end
-    # :nocov:
+    # Typecast the value to an Integer
+    def typecast_value_integer(value)
+      (value.is_a?(String) && value =~ /\A0+(\d)/) ? Integer(value, 10) : Integer(value)
     end
 
     # Typecast the value to a String
@@ -547,8 +523,7 @@ module Sequel
         if value.is_a?(SQLTime)
           value
         else
-          # specifically check for nsec == 0 value to work around JRuby 1.6 ruby 1.9 mode bug
-          SQLTime.create(value.hour, value.min, value.sec, (value.respond_to?(:nsec) && value.nsec != 0) ? value.nsec/1000.0 : value.usec)
+          SQLTime.create(value.hour, value.min, value.sec, value.nsec/1000.0)
         end
       when String
         Sequel.string_to_time(value)

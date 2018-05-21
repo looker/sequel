@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe Sequel::Model, "to_dot extension" do
   def dot(ds)
@@ -25,8 +25,7 @@ END
   end
 
   it "should handle WITH" do
-    def @ds.supports_cte?(*) true end
-    a = dot(@ds.with(:a, @ds))
+    a = dot(@ds.with_extend{def supports_cte?(*) true end}.with(:a, @ds))
     a[0..3].must_equal ["1 -> 2 [label=\"with\"];", "2 [label=\"Array\"];", "2 -> 3 [label=\"0\"];", "3 [label=\"Hash\"];"]
     [["3 -> 4 [label=\"dataset\"];", "4 [label=\"Dataset\"];", "3 -> 5 [label=\"name\"];", "5 [label=\":a\"];"],
      ["3 -> 4 [label=\"name\"];", "4 [label=\":a\"];", "3 -> 5 [label=\"dataset\"];", "5 [label=\"Dataset\"];"]].must_include(a[4..-1])
@@ -81,7 +80,7 @@ END
   end
 
   it "should handle LiteralStrings" do
-    dot(@ds.filter('a')).must_equal ["1 -> 2 [label=\"where\"];", "2 [label=\"\\\"(a)\\\".lit\"];"]
+    dot(@ds.filter(Sequel.lit('a'))).must_equal ["1 -> 2 [label=\"where\"];", "2 [label=\"Sequel.lit(\\\"(a)\\\")\"];"]
   end
 
   it "should handle true, false, nil" do
@@ -97,7 +96,7 @@ END
   end
 
   it "should handle SQL::QualifiedIdentifiers" do
-    dot(@ds.select{a__b}).must_equal ["1 -> 2 [label=\"select\"];", "2 [label=\"Array\"];", "2 -> 3 [label=\"0\"];", "3 [label=\"QualifiedIdentifier\"];", "3 -> 4 [label=\"table\"];", "4 [label=\"\\\"a\\\"\"];", "3 -> 5 [label=\"column\"];", "5 [label=\"\\\"b\\\"\"];"]
+    dot(@ds.select{a[b]}).must_equal ["1 -> 2 [label=\"select\"];", "2 [label=\"Array\"];", "2 -> 3 [label=\"0\"];", "3 [label=\"QualifiedIdentifier\"];", "3 -> 4 [label=\"table\"];", "4 [label=\"\\\"a\\\"\"];", "3 -> 5 [label=\"column\"];", "5 [label=\"\\\"b\\\"\"];"]
   end
 
   it "should handle SQL::OrderedExpressions" do
@@ -129,11 +128,11 @@ END
   end
 
   it "should handle SQL::Function with a window" do
-    dot(@ds.select{sum{}.over(:partition=>:a)}).must_equal ["1 -> 2 [label=\"select\"];", "2 [label=\"Array\"];", "2 -> 3 [label=\"0\"];", "3 [label=\"Function: sum\"];", "3 -> 4 [label=\"args\"];", "4 [label=\"Array\"];", "3 -> 5 [label=\"opts\"];", "5 [label=\"Hash\"];", "5 -> 6 [label=\"over\"];", "6 [label=\"Window\"];", "6 -> 7 [label=\"opts\"];", "7 [label=\"Hash\"];", "7 -> 8 [label=\"partition\"];", "8 [label=\":a\"];"]
+    dot(@ds.select(Sequel.function(:sum).over(:partition=>:a))).must_equal ["1 -> 2 [label=\"select\"];", "2 [label=\"Array\"];", "2 -> 3 [label=\"0\"];", "3 [label=\"Function: sum\"];", "3 -> 4 [label=\"args\"];", "4 [label=\"Array\"];", "3 -> 5 [label=\"opts\"];", "5 [label=\"Hash\"];", "5 -> 6 [label=\"over\"];", "6 [label=\"Window\"];", "6 -> 7 [label=\"opts\"];", "7 [label=\"Hash\"];", "7 -> 8 [label=\"partition\"];", "8 [label=\":a\"];"]
   end
 
   it "should handle SQL::PlaceholderLiteralString" do
-    dot(@ds.where("?", true)).must_equal ["1 -> 2 [label=\"where\"];", "2 [label=\"PlaceholderLiteralString: \\\"(?)\\\"\"];", "2 -> 3 [label=\"args\"];", "3 [label=\"Array\"];", "3 -> 4 [label=\"0\"];", "4 [label=\"true\"];"]
+    dot(@ds.where(Sequel.lit("?", true))).must_equal ["1 -> 2 [label=\"where\"];", "2 [label=\"PlaceholderLiteralString: \\\"(?)\\\"\"];", "2 -> 3 [label=\"args\"];", "3 [label=\"Array\"];", "3 -> 4 [label=\"0\"];", "4 [label=\"true\"];"]
   end
 
   it "should handle JOIN ON" do

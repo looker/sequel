@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('com.mysql.jdbc.Driver', :MySQL)
-Sequel.require 'adapters/shared/mysql'
+require_relative '../shared/mysql'
 
 module Sequel
   module JDBC
@@ -13,24 +13,11 @@ module Sequel
       end
     end
 
-    # Database and Dataset instance methods for MySQL specific
-    # support via JDBC.
     module MySQL
-      # Database instance methods for MySQL databases accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::MySQL::DatabaseMethods
-        LAST_INSERT_ID = 'SELECT LAST_INSERT_ID()'.freeze
         
         private
-        
-        # The database name for the given database.  Need to parse it out
-        # of the connection string, since the JDBC does no parsing on the
-        # given connection string by default.
-        def database_name
-          u = URI.parse(uri.sub(/\Ajdbc:/, ''))
-          (m = /\/(.*)/.match(u.path)) && m[1]
-        end
         
         # MySQL exception handling with SQLState is less accurate than with regexps.
         def database_exception_use_sqlstates?
@@ -57,7 +44,7 @@ module Sequel
             end
           else
             statement(conn) do |st|
-              rs = st.executeQuery(LAST_INSERT_ID)
+              rs = st.executeQuery('SELECT LAST_INSERT_ID()')
               rs.next
               rs.getLong(1)
             end
@@ -85,6 +72,16 @@ module Sequel
         def setup_connection(conn)
           mysql_connection_setting_sqls.each{|sql| statement(conn){|s| log_connection_yield(sql, conn){s.execute(sql)}}}
           super
+        end
+
+        # Handle unsigned integer values
+        def setup_type_convertor_map
+          super
+          TypeConvertor::BASIC_MAP.dup
+          @type_convertor_map[Java::JavaSQL::Types::SMALLINT] = @type_convertor_map[Java::JavaSQL::Types::INTEGER]
+          @type_convertor_map[Java::JavaSQL::Types::INTEGER] = @type_convertor_map[Java::JavaSQL::Types::BIGINT]
+          @basic_type_convertor_map[Java::JavaSQL::Types::SMALLINT] = @basic_type_convertor_map[Java::JavaSQL::Types::INTEGER]
+          @basic_type_convertor_map[Java::JavaSQL::Types::INTEGER] = @basic_type_convertor_map[Java::JavaSQL::Types::BIGINT]
         end
       end
     end

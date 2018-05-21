@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 Sequel.extension :thread_local_timezones
 
@@ -22,7 +22,7 @@ describe "Sequel thread_local_timezones extension" do
     Sequel.thread_database_timezone = :utc
     Sequel.database_timezone.must_equal :utc
     Sequel.thread_typecast_timezone = nil
-    Sequel.typecast_timezone.must_equal nil
+    Sequel.typecast_timezone.must_be_nil
   end
   
   it "should fallback to default timezone if no thread_local timezone" do
@@ -37,7 +37,7 @@ describe "Sequel thread_local_timezones extension" do
     Sequel.thread_typecast_timezone = nil
     Sequel.typecast_timezone.must_equal :utc
     Sequel.thread_typecast_timezone = :nil
-    Sequel.typecast_timezone.must_equal nil
+    Sequel.typecast_timezone.must_be_nil
   end
     
   it "should be thread safe" do

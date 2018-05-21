@@ -51,7 +51,15 @@ module Sequel
   module SchemaCaching
     # Dump the cached schema to the filename given in Marshal format.
     def dump_schema_cache(file)
-      File.open(file, 'wb'){|f| f.write(Marshal.dump(@schemas))}
+      sch = {}
+      @schemas.each do |k,v|
+        sch[k] = v.map do |c, h|
+          h = Hash[h]
+          h.delete(:callable_default)
+          [c, h]
+        end
+      end
+      File.open(file, 'wb'){|f| f.write(Marshal.dump(sch))}
       nil
     end
 
@@ -65,6 +73,7 @@ module Sequel
     # should be in Marshal format.
     def load_schema_cache(file)
       @schemas = Marshal.load(File.read(file))
+      @schemas.each_value{|v| schema_post_process(v)}
       nil
     end
 

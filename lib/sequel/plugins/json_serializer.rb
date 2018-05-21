@@ -13,34 +13,41 @@ module Sequel
     #
     #   album = Album[1]
     #   album.to_json
-    #   # => '{"json_class"=>"Album","id"=>1,"name"=>"RF","artist_id"=>2}'
+    #   # => '{"id"=>1,"name"=>"RF","artist_id"=>2}'
     #
     # In addition, you can provide options to control the JSON output:
     #
-    #   album.to_json(:only=>:name)
-    #   album.to_json(:except=>[:id, :artist_id])
+    #   album.to_json(only: :name)
+    #   album.to_json(except: [:id, :artist_id])
     #   # => '{"json_class"="Album","name"=>"RF"}'
     #   
-    #   album.to_json(:include=>:artist)
-    #   # => '{"json_class":"Album","id":1,"name":"RF","artist_id":2,
-    #   #      "artist":{"json_class":"Artist","id":2,"name":"YJM"}}'
+    #   album.to_json(include: :artist)
+    #   # => '{"id":1,"name":"RF","artist_id":2,
+    #   #      "artist":{"id":2,"name":"YJM"}}'
     # 
     # You can use a hash value with <tt>:include</tt> to pass options
     # to associations:
     #
-    #   album.to_json(:include=>{:artist=>{:only=>:name}})
-    #   # => '{"json_class":"Album","id":1,"name":"RF","artist_id":2,
-    #   #      "artist":{"json_class":"Artist","name":"YJM"}}'
+    #   album.to_json(include: {artist: {only: :name}})
+    #   # => '{"id":1,"name":"RF","artist_id":2,
+    #   #      "artist":{"name":"YJM"}}'
     #
+    # You can specify a name for a given association by using an aliased
+    # expression as the key in the <tt>:include</tt> hash
+    #
+    #   album.to_json(include: {Sequel.as(:artist, :singer)=>{only: :name}})
+    #   # => '{"id":1,"name":"RF","artist_id":2,
+    #   #      "singer":{"name":"YJM"}}'
+    # 
     # You can specify the <tt>:root</tt> option to nest the JSON under the
     # name of the model:
     #
-    #   album.to_json(:root => true)
+    #   album.to_json(root: true)
     #   # => '{"album":{"id":1,"name":"RF","artist_id":2}}'
     #
     # You can specify JSON serialization options to use later:
     #
-    #   album.json_serializer_opts(:root => true)
+    #   album.json_serializer_opts(root: true)
     #   [album].to_json
     #   # => '[{"album":{"id":1,"name":"RF","artist_id":2}}]'
     #
@@ -48,12 +55,17 @@ module Sequel
     # of which return all objects in the dataset:
     #
     #   Album.to_json
-    #   Album.filter(:artist_id=>1).to_json(:include=>:tags)
+    #   Album.where(artist_id: 1).to_json(include: :tags)
     #
     # If you have an existing array of model instances you want to convert to
     # JSON, you can call the class to_json method with the :array option:
     #
-    #   Album.to_json(:array=>[Album[1], Album[2]])
+    #   Album.to_json(array: [Album[1], Album[2]])
+    #
+    # All to_json methods take blocks, and if a block is given, it will yield
+    # the array or hash before serialization, and will serialize the value
+    # the block returns.  This allows you to customize the resulting JSON format
+    # on a per-call basis.
     #
     # In addition to creating JSON, this plugin also enables Sequel::Model
     # classes to create instances directly from JSON using the from_json class
@@ -65,7 +77,7 @@ module Sequel
     # The array_from_json class method exists to parse arrays of model instances
     # from json:
     #
-    #   json = Album.filter(:artist_id=>1).to_json
+    #   json = Album.where(artist_id: 1).to_json
     #   albums = Album.array_from_json(json)
     #
     # These does not necessarily round trip, since doing so would let users
@@ -74,7 +86,7 @@ module Sequel
     # fields, you can use the :fields option, which will call set_fields with
     # the given fields:
     #
-    #   Album.from_json(album.to_json, :fields=>%w'id name')
+    #   Album.from_json(album.to_json, fields: %w'id name')
     #
     # If you want to update an existing instance, you can use the from_json
     # instance method:
@@ -84,11 +96,11 @@ module Sequel
     # Both of these allow creation of cached associated objects, if you provide
     # the :associations option:
     #
-    #   album.from_json(json, :associations=>:artist)
+    #   album.from_json(json, associations: :artist)
     #
     # You can even provide options when setting up the associated objects:
     #
-    #   album.from_json(json, :associations=>{:artist=>{:fields=>%w'id name', :associations=>:tags}})
+    #   album.from_json(json, associations: {artist: {fields: %w'id name', associations: :tags}})
     #
     # Note that active_support/json makes incompatible changes to the to_json API,
     # and breaks some aspects of the json_serializer plugin.  You can undo the damage
@@ -119,9 +131,9 @@ module Sequel
     module JsonSerializer
       # Set up the column readers to do deserialization and the column writers
       # to save the value in deserialized_values.
-      def self.configure(model, opts={})
-        model.instance_eval do
-          @json_serializer_opts = (@json_serializer_opts || {}).merge(opts)
+      def self.configure(model, opts=OPTS)
+        model.instance_exec do
+          @json_serializer_opts = (@json_serializer_opts || OPTS).merge(opts)
         end
       end
       
@@ -144,6 +156,15 @@ module Sequel
       module ClassMethods
         # The default opts to use when serializing model objects to JSON.
         attr_reader :json_serializer_opts
+
+        # Freeze json serializier opts when freezing model class
+        def freeze
+          @json_serializer_opts.freeze.each_value do |v|
+            v.freeze if v.is_a?(Array) || v.is_a?(Hash)
+          end
+
+          super
+        end
 
         # Attempt to parse a single instance from the given JSON string,
         # with options passed to InstanceMethods#from_json_node.
@@ -206,10 +227,10 @@ module Sequel
           if assocs = opts[:associations]
             assocs = case assocs
             when Symbol
-              {assocs=>{}}
+              {assocs=>OPTS}
             when Array
               assocs_tmp = {}
-              assocs.each{|v| assocs_tmp[v] = {}}
+              assocs.each{|v| assocs_tmp[v] = OPTS}
               assocs_tmp
             when Hash
               assocs
@@ -255,7 +276,7 @@ module Sequel
         #
         # Example:
         #
-        #   obj.json_serializer_opts(:only=>:name)
+        #   obj.json_serializer_opts(only: :name)
         #   [obj].to_json # => '[{"name":"..."}]'
         def json_serializer_opts(opts=OPTS)
           @json_serializer_opts = Hash[@json_serializer_opts||OPTS].merge!(opts)
@@ -299,9 +320,16 @@ module Sequel
           if inc = opts[:include]
             if inc.is_a?(Hash)
               inc.each do |k, v|
+                if k.is_a?(Sequel::SQL::AliasedExpression)
+                  key_name = k.alias.to_s
+                  k = k.expression
+                else
+                  key_name = k.to_s
+                end
+
                 v = v.empty? ? [] : [v]
 
-                objs = send(k)
+                objs = public_send(k)
 
                 is_array = if r = model.association_reflection(k)
                   r.returns_array?
@@ -309,14 +337,22 @@ module Sequel
                   objs.is_a?(Array)
                 end
                 
-                h[k.to_s] = if is_array
+                h[key_name] = if is_array
                   objs.map{|obj| Literal.new(Sequel.object_to_json(obj, *v))}
                 else
                   Literal.new(Sequel.object_to_json(objs, *v))
                 end
               end
             else
-              Array(inc).each{|c| h[c.to_s] = send(c)}
+              Array(inc).each do |c|
+                if c.is_a?(Sequel::SQL::AliasedExpression)
+                  key_name = c.alias.to_s
+                  c = c.expression
+                else
+                  key_name = c.to_s
+                end
+                h[key_name] = public_send(c)
+              end
             end
           end
 
@@ -327,6 +363,7 @@ module Sequel
             h = {root => h}
           end
 
+          h = yield h if block_given?
           Sequel.object_to_json(h, *a)
         end
       end
@@ -339,6 +376,8 @@ module Sequel
         #
         # :array :: An array of instances.  If this is not provided,
         #           calls #all on the receiver to get the array.
+        # :instance_block :: A block to pass to #to_json for each
+        #                    value in the dataset (or :array option).
         # :root :: If set to :collection, wraps the collection
         #          in a root object using the pluralized, underscored model
         #          name as the key.  If set to :instance, only wraps
@@ -367,23 +406,22 @@ module Sequel
             end
           end
 
-          res = if row_proc 
+          res = if row_proc || @opts[:eager_graph] 
             array = if opts[:array]
               opts = opts.dup
               opts.delete(:array)
             else
               all
             end
-            array.map{|obj| Literal.new(Sequel.object_to_json(obj, opts))}
-           else
+            array.map{|obj| Literal.new(Sequel.object_to_json(obj, opts, &opts[:instance_block]))}
+          else
             all
           end
 
-          if collection_root
-            Sequel.object_to_json({collection_root => res}, *a)
-          else
-            Sequel.object_to_json(res, *a)
-          end
+          res = {collection_root => res} if collection_root
+          res = yield res if block_given?
+
+          Sequel.object_to_json(res, *a)
         end
       end
     end

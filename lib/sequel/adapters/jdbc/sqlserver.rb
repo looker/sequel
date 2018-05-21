@@ -1,7 +1,7 @@
 # frozen-string-literal: true
 
 Sequel::JDBC.load_driver('com.microsoft.sqlserver.jdbc.SQLServerDriver')
-Sequel.require 'adapters/jdbc/mssql'
+require_relative 'mssql'
 
 module Sequel
   module JDBC
@@ -14,13 +14,37 @@ module Sequel
       end
     end
 
-    # Database and Dataset instance methods for SQLServer specific
-    # support via JDBC.
     module SQLServer
-      # Database instance methods for SQLServer databases accessed via JDBC.
+      def self.MSSQLRubyTime(r, i)
+        # MSSQL-Server TIME should be fetched as string to keep the precision intact, see:
+        # https://docs.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql#a-namebackwardcompatibilityfordownlevelclientsa-backward-compatibility-for-down-level-clients
+        if v = r.getString(i)
+          Sequel.string_to_time("#{v}")
+        end
+      end
+
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::JDBC::MSSQL::DatabaseMethods
+
+        def setup_type_convertor_map
+          super
+          map = @type_convertor_map
+          map[Java::JavaSQL::Types::TIME] = SQLServer.method(:MSSQLRubyTime)
+
+          # Work around constant lazy loading in some drivers
+          begin
+            dto = Java::MicrosoftSql::Types::DATETIMEOFFSET
+          rescue NameError
+          end
+
+          if dto
+            map[dto] = lambda do |r, i|
+              if v = r.getDateTimeOffset(i)
+                to_application_timestamp(v.to_s)
+              end
+            end
+          end
+        end
 
         # Work around a bug in SQL Server JDBC Driver 3.0, where the metadata
         # for the getColumns result set specifies an incorrect type for the
@@ -48,11 +72,11 @@ module Sequel
           end
         end
         
-        def metadata_dataset
+        private
+
+        def _metadata_dataset
           super.extend(MetadataDatasetMethods)
         end
-
-        private
 
         def disconnect_error?(exception, opts)
           super || (exception.message =~ /connection is closed/)

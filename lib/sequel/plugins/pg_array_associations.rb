@@ -75,12 +75,12 @@ module Sequel
     module PgArrayAssociations
       # The AssociationReflection subclass for many_to_pg_array associations.
       class ManyToPgArrayAssociationReflection < Sequel::Model::Associations::AssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:many_to_pg_array] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:many_to_pg_array] = self}
 
         def array_type
           cached_fetch(:array_type) do
             if (sch = associated_class.db_schema) && (s = sch[self[:key]]) && (t = s[:db_type])
-              t
+              t.sub(/\[\]\z/, '').freeze
             else
               :integer
             end
@@ -120,6 +120,13 @@ module Sequel
         # Don't use a filter by associations limit strategy
         def filter_by_associations_limit_strategy
           nil
+        end
+
+        FINALIZE_SETTINGS = superclass::FINALIZE_SETTINGS.merge(
+          :array_type=>:array_type
+        ).freeze
+        def finalize_settings
+          FINALIZE_SETTINGS
         end
 
         # Handle silent failure of add/remove methods if raise_on_save_failure is false.
@@ -177,12 +184,12 @@ module Sequel
 
       # The AssociationReflection subclass for pg_array_to_many associations.
       class PgArrayToManyAssociationReflection < Sequel::Model::Associations::AssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:pg_array_to_many] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:pg_array_to_many] = self}
 
         def array_type
           cached_fetch(:array_type) do
             if (sch = self[:model].db_schema) && (s = sch[self[:key]]) && (t = s[:db_type])
-              t
+              t.sub(/\[\]\z/, '').freeze
             else
               :integer
             end
@@ -227,6 +234,15 @@ module Sequel
         # Don't use a filter by associations limit strategy
         def filter_by_associations_limit_strategy
           nil
+        end
+
+        FINALIZE_SETTINGS = superclass::FINALIZE_SETTINGS.merge(
+          :array_type=>:array_type,
+          :primary_key=>:primary_key,
+          :primary_key_method=>:primary_key_method
+        ).freeze
+        def finalize_settings
+          FINALIZE_SETTINGS
         end
 
         # Handle silent failure of add/remove methods if raise_on_save_failure is false
@@ -281,6 +297,11 @@ module Sequel
         end
       end
 
+      # Add the pg_array extension to the database
+      def self.apply(model)
+        model.db.extension(:pg_array)
+      end
+
       module ClassMethods
         # Create a many_to_pg_array association, for the case where the associated
         # table contains the array with foreign keys pointing to the current table.
@@ -307,7 +328,10 @@ module Sequel
           opts[:key] = opts.default_key unless opts.has_key?(:key)
           key = opts[:key]
           key_column = opts[:key_column] ||= opts[:key]
-          opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
+          if opts[:uniq]
+            opts[:after_load] ||= []
+            opts[:after_load].unshift(:array_uniq!)
+          end
           opts[:dataset] ||= lambda do
             opts.associated_dataset.where(Sequel.pg_array_op(opts.predicate_key).contains(Sequel.pg_array([get_column_value(pk)], opts.array_type)))
           end
@@ -376,7 +400,9 @@ module Sequel
           end
 
           opts[:clearer] ||= proc do
-            opts.associated_dataset.where(Sequel.pg_array_op(key).contains([get_column_value(pk)])).update(key=>Sequel.function(:array_remove, key, get_column_value(pk)))
+            pk_value = get_column_value(pk)
+            db_type = opts.array_type
+            opts.associated_dataset.where(Sequel.pg_array_op(key).contains(Sequel.pg_array([pk_value], db_type))).update(key=>Sequel.function(:array_remove, key, Sequel.cast(pk_value, db_type)))
           end
         end
 
@@ -387,7 +413,10 @@ module Sequel
           key = opts[:key]
           key_column = opts[:key_column] ||= key
           opts[:eager_loader_key] = nil
-          opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
+          if opts[:uniq]
+            opts[:after_load] ||= []
+            opts[:after_load].unshift(:array_uniq!)
+          end
           opts[:dataset] ||= lambda do
             opts.associated_dataset.where(opts.predicate_key=>get_column_value(key).to_a)
           end
@@ -491,14 +520,14 @@ module Sequel
           expr = case obj
           when Sequel::Model
             if (assoc_pks = obj.get_column_value(key)) && !assoc_pks.empty?
-              Sequel.expr(pk=>assoc_pks.to_a)
+              Sequel[pk=>assoc_pks.to_a]
             end
           when Array
             if (assoc_pks = obj.map{|o| o.get_column_value(key)}.flatten.compact.uniq) && !assoc_pks.empty?
-              Sequel.expr(pk=>assoc_pks)
+              Sequel[pk=>assoc_pks]
             end
           when Sequel::Dataset
-            Sequel.expr(pk=>obj.select{Sequel.pg_array_op(ref.qualify(obj.model.table_name, ref[:key_column])).unnest})
+            Sequel[pk=>obj.select{Sequel.pg_array_op(ref.qualify(obj.model.table_name, ref[:key_column])).unnest}]
           end
           expr = Sequel::SQL::Constants::FALSE unless expr
           expr = add_association_filter_conditions(ref, obj, expr)

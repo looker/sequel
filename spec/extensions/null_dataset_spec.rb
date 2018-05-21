@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "null_dataset extension" do
   before do
@@ -17,12 +17,17 @@ describe "null_dataset extension" do
   end
 
   it "should make fetch_rows be a noop" do
-    @ds.fetch_rows("SELECT 1", &@pr).must_equal nil
+    @ds.fetch_rows("SELECT 1", &@pr).must_be_nil
     @i.must_equal 0
   end
 
+  it "nullify should be a cached dataset" do
+    ds = @db[:table]
+    ds.nullify.object_id.must_equal(ds.nullify.object_id)
+  end
+
   it "should make insert be a noop" do
-    @ds.insert(1).must_equal nil
+    @ds.insert(1).must_be_nil
   end
 
   it "should make update be a noop" do
@@ -34,19 +39,21 @@ describe "null_dataset extension" do
   end
 
   it "should make truncate be a noop" do
-    @ds.truncate.must_equal nil
+    @ds.truncate.must_be_nil
   end
 
   it "should make execute_* be a noop" do
-    @ds.send(:execute_ddl,'FOO').must_equal nil
-    @ds.send(:execute_insert,'FOO').must_equal nil
-    @ds.send(:execute_dui,'FOO').must_equal nil
-    @ds.send(:execute,'FOO').must_equal nil
+    @ds.send(:execute_ddl,'FOO').must_be_nil
+    @ds.send(:execute_insert,'FOO').must_be_nil
+    @ds.send(:execute_dui,'FOO').must_be_nil
+    @ds.send(:execute,'FOO').must_be_nil
   end
 
   it "should have working columns" do
     @skip_check = true
-    @ds.columns.must_equal [:id]
+    2.times do
+      @ds.columns.must_equal [:id]
+    end
     @db.sqls.must_equal ['SELECT * FROM table LIMIT 1']
   end
 
@@ -59,7 +66,7 @@ describe "null_dataset extension" do
   end
 
   it "should make import a noop" do
-    @ds.import([:id], [[1], [2], [3]]).must_equal nil
+    @ds.import([:id], [[1], [2], [3]]).must_be_nil
   end
 
   it "should have nullify method returned modified receiver" do
@@ -69,13 +76,6 @@ describe "null_dataset extension" do
     ds.each(&@pr)
     @db.sqls.must_equal ['SELECT * FROM table']
     @i.must_equal 1
-  end
-
-  it "should have nullify! method modify receiver" do
-    ds = @db[:table]
-    ds.nullify!.must_be_same_as(ds)
-    ds.each(&@pr)
-    @i.must_equal 0
   end
 
   it "should work with method chaining" do

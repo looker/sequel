@@ -12,15 +12,15 @@ module Sequel
     #   end
     #   p1 = Person[1]
     #   p2 = Person[1]
-    #   p1.update(:name=>'Jim') # works
-    #   p2.update(:name=>'Bob') # raises Sequel::NoExistingObject
+    #   p1.update(name: 'Jim') # works
+    #   p2.update(name: 'Bob') # raises Sequel::NoExistingObject
     #
     # In order for this plugin to work, you need to make sure that the database
     # table has a column of timestamp or rowversion.  The plugin uses a default
     # name of timestamp for this columns, but you can override that using the
     # :lock_column option:
     #
-    #     plugin :mssql_optimistic_locking, :lock_column=>:column_name
+    #     plugin :mssql_optimistic_locking, lock_column: :column_name
     #
     # This plugin relies on the instance_filters plugin.
     module MssqlOptimisticLocking
@@ -75,7 +75,8 @@ module Sequel
         # it to be assigned.
         def _save_update_all_columns_hash
           v = @values.dup
-          Array(primary_key).each{|x| v.delete(x) unless changed_columns.include?(x)}
+          cc = changed_columns
+          Array(primary_key).each{|x| v.delete(x) unless cc.include?(x)}
           v.delete(model.lock_column)
           v
         end
@@ -84,7 +85,7 @@ module Sequel
         def _update_without_checking(columns)
           ds = _update_dataset
           lc = model.lock_column
-          rows = ds.clone(ds.send(:default_server_opts, :sql=>ds.output(nil, [Sequel.qualify(:inserted, lc)]).update_sql(columns))).all
+          rows = ds.clone(ds.send(:default_server_opts, :sql=>ds.output(nil, [Sequel[:inserted][lc]]).update_sql(columns))).all
           values[lc] = rows.first[lc] unless rows.empty?
           rows.length
         end

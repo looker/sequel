@@ -7,7 +7,7 @@ module Sequel
     # when ordering.
     def empty?
       return super unless emulate_offset_with_row_number?
-      get(Sequel::SQL::AliasedExpression.new(1, :one)).nil?
+      select(Dataset::EMPTY_SELECT).limit(1).single_value!.nil?
     end
 
     # Emulate OFFSET support with the ROW_NUMBER window function
@@ -36,7 +36,7 @@ module Sequel
       sql = @opts[:append_sql] || String.new
       subselect_sql_append(sql, unlimited.
         unordered.
-        select_append{ROW_NUMBER{}.over(:order=>order).as(rn)}.
+        select_append(Sequel.function(:ROW_NUMBER).over(:order=>order).as(rn)).
         from_self(:alias=>dsa1).
         select(*columns).
         limit(@opts[:limit]).

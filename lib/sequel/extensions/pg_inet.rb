@@ -5,7 +5,7 @@
 #
 # This extension integrates with Sequel's native postgres and jdbc/postgresql
 # adapters, so that when inet/cidr fields are retrieved, they are returned as
-# IPAddr instances
+# IPAddr instances.
 #
 # To use this extension, load it into your database:
 #
@@ -29,7 +29,6 @@
 # Related module: Sequel::Postgres::InetDatabaseMethods
 
 require 'ipaddr'
-Sequel.require 'adapters/utils/pg_types'
 
 module Sequel
   module Postgres
@@ -39,9 +38,16 @@ module Sequel
       # it will pick up the inet/cidr converter.  Also, extend the datasets
       # with support for literalizing the IPAddr types.
       def self.extended(db)
-        db.instance_eval do
+        db.instance_exec do
           extend_datasets(InetDatasetMethods)
-          copy_conversion_procs([869, 650, 1041, 651, 1040])
+          meth = IPAddr.method(:new)
+          add_conversion_proc(869, meth)
+          add_conversion_proc(650, meth)
+          if respond_to?(:register_array_type)
+            register_array_type('inet', :oid=>1041, :scalar_oid=>869)
+            register_array_type('cidr', :oid=>651, :scalar_oid=>650)
+            register_array_type('macaddr', :oid=>1040, :scalar_oid=>829)
+          end
           @schema_type_classes[:ipaddr] = IPAddr
         end
       end
@@ -79,6 +85,16 @@ module Sequel
         end
       end
 
+      # Set the :ruby_default value if the default value is recognized as an ip address.
+      def schema_post_process(_)
+        super.each do |a|
+          h = a[1]
+          if h[:type] == :ipaddr && h[:default] =~ /\A'([:a-fA-F0-9\.\/]+)'::(?:inet|cidr)\z/
+            h[:ruby_default] = IPAddr.new($1)
+          end
+        end
+      end
+
       # Typecast the given value to an IPAddr object.
       def typecast_value_ipaddr(value)
         case value
@@ -104,13 +120,6 @@ module Sequel
           super
         end
       end
-    end
-
-    PG_TYPES[869] = PG_TYPES[650] = IPAddr.method(:new)
-    if defined?(PGArray) && PGArray.respond_to?(:register)
-      PGArray.register('inet', :oid=>1041, :scalar_oid=>869)
-      PGArray.register('cidr', :oid=>651, :scalar_oid=>650)
-      PGArray.register('macaddr', :oid=>1040)
     end
   end
 

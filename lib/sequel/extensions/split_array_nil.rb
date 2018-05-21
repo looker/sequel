@@ -3,7 +3,7 @@
 # The split_array_nil extension overrides Sequel's default handling of
 # IN/NOT IN with arrays of values to do specific nil checking.  For example,
 #
-#   ds = DB[:table].where(:column=>[1, nil])
+#   ds = DB[:table].where(column: [1, nil])
 # 
 # By default, that produces the following SQL:
 #
@@ -19,7 +19,7 @@
 #
 # Similarly, for NOT IN queries:
 #
-#   ds = DB[:table].exclude(:column=>[1, nil])
+#   ds = DB[:table].exclude(column: [1, nil])
 #   # Default:
 #   #   SELECT * FROM table WHERE (column NOT IN (1, NULL))
 #   # with split_array_nils extension:
@@ -46,9 +46,9 @@ module Sequel
       def complex_expression_sql_append(sql, op, args)
       case op
       when :IN, :"NOT IN"
-        vals = args.at(1)
+        vals = args[1]
         if vals.is_a?(Array) && vals.any?(&:nil?)
-          cols = args.at(0)
+          cols = args[0]
           vals = vals.compact
           c = Sequel::SQL::BooleanExpression
           if op == :IN

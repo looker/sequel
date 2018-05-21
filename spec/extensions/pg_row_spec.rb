@@ -1,30 +1,31 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "pg_row extension" do
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @db.extension(:pg_array, :pg_row)
     @m = Sequel::Postgres::PGRow
     @db.sqls
   end
 
   it "should parse record objects as arrays" do
-    a = Sequel::Postgres::PG_TYPES[2249].call("(a,b,c)")
+    a = @db.conversion_procs[2249].call("(a,b,c)")
     a.class.must_equal(@m::ArrayRow)
     a.to_a.must_be_kind_of(Array)
     a[0].must_equal 'a'
     a.must_equal %w'a b c'
-    a.db_type.must_equal nil
+    a.db_type.must_be_nil
     @db.literal(a).must_equal "ROW('a', 'b', 'c')"
   end
 
   it "should parse arrays of record objects as arrays of arrays" do
-    as = Sequel::Postgres::PG_TYPES[2287].call('{"(a,b,c)","(d,e,f)"}')
+    as = @db.conversion_procs[2287].call('{"(a,b,c)","(d,e,f)"}')
     as.must_equal [%w'a b c', %w'd e f']
     as.each do |a|
       a.class.must_equal(@m::ArrayRow)
       a.to_a.must_be_kind_of(Array)
-      a.db_type.must_equal nil
+      a.db_type.must_be_nil
     end
     @db.literal(as).must_equal "ARRAY[ROW('a', 'b', 'c'),ROW('d', 'e', 'f')]::record[]"
   end
@@ -134,29 +135,6 @@ describe "pg_row extension" do
     p.column_converters.must_equal [Array]
   end
 
-  it "should reload registered row types when reseting conversion procs" do
-    db = Sequel.mock(:host=>'postgres')
-    db.extension(:pg_row)
-    db.conversion_procs[4] = proc{|s| s.to_i}
-    db.conversion_procs[5] = proc{|s| s * 2}
-    db.sqls
-    db.fetch = [[{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
-    db.register_row_type(:foo)
-    db.sqls.must_equal ["SELECT pg_type.oid, typrelid, typarray FROM pg_type WHERE ((typtype = 'c') AND (typname = 'foo')) LIMIT 1",
-      "SELECT attname, (CASE pg_type.typbasetype WHEN 0 THEN atttypid ELSE pg_type.typbasetype END) AS atttypid FROM pg_attribute INNER JOIN pg_type ON (pg_type.oid = pg_attribute.atttypid) WHERE ((attrelid = 2) AND (attnum > 0) AND NOT attisdropped) ORDER BY attnum"]
-
-    begin
-      pgnt = Sequel::Postgres::PG_NAMED_TYPES.dup
-      Sequel::Postgres::PG_NAMED_TYPES.clear
-      db.fetch = [[{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
-      db.reset_conversion_procs
-      db.sqls.must_equal ["SELECT pg_type.oid, typrelid, typarray FROM pg_type WHERE ((typtype = 'c') AND (typname = 'foo')) LIMIT 1",
-        "SELECT attname, (CASE pg_type.typbasetype WHEN 0 THEN atttypid ELSE pg_type.typbasetype END) AS atttypid FROM pg_attribute INNER JOIN pg_type ON (pg_type.oid = pg_attribute.atttypid) WHERE ((attrelid = 2) AND (attnum > 0) AND NOT attisdropped) ORDER BY attnum"]
-    ensure
-      Sequel::Postgres::PG_NAMED_TYPES.replace pgnt
-    end
-  end
-
   it "should handle ArrayRows and HashRows in bound variables" do
     @db.bound_variable_arg(1, nil).must_equal 1
     @db.bound_variable_arg(@m::ArrayRow.call(["1", "abc\\'\","]), nil).must_equal '("1","abc\\\\\'\\",")'
@@ -208,6 +186,31 @@ describe "pg_row extension" do
     @db.conversion_procs[4] = p4 = proc{|s| s.to_i}
     @db.conversion_procs[5] = p5 = proc{|s| s * 2}
     @db.fetch = [[{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
+    @db.register_row_type(Sequel[:foo][:bar])
+    @db.sqls.must_equal ["SELECT pg_type.oid, typrelid, typarray FROM pg_type INNER JOIN pg_namespace ON ((pg_namespace.oid = pg_type.typnamespace) AND (pg_namespace.nspname = 'foo')) WHERE ((typtype = 'c') AND (typname = 'bar')) LIMIT 1",
+      "SELECT attname, (CASE pg_type.typbasetype WHEN 0 THEN atttypid ELSE pg_type.typbasetype END) AS atttypid FROM pg_attribute INNER JOIN pg_type ON (pg_type.oid = pg_attribute.atttypid) WHERE ((attrelid = 2) AND (attnum > 0) AND NOT attisdropped) ORDER BY attnum"]
+    p1 = @db.conversion_procs[1]
+    p1.columns.must_equal [:bar, :baz]
+    p1.column_oids.must_equal [4, 5]
+    p1.column_converters.must_equal [p4, p5]
+    p1.oid.must_equal 1
+
+    c = p1.converter
+    c.superclass.must_equal @m::HashRow
+    c.columns.must_equal [:bar, :baz]
+    c.db_type.must_equal Sequel[:foo][:bar]
+    p1.typecaster.must_equal c
+
+    p1.call('(1,b)').must_equal(:bar=>1, :baz=>'bb')
+    @db.typecast_value(:pg_row_foo__bar, %w'1 b').must_equal(:bar=>'1', :baz=>'b')
+    @db.typecast_value(:pg_row_foo__bar, :bar=>'1', :baz=>'b').must_equal(:bar=>'1', :baz=>'b')
+    @db.literal(p1.call('(1,b)')).must_equal "ROW(1, 'bb')::foo.bar"
+  end
+
+  with_symbol_splitting "should allow registering row type parsers for schema qualify type symbols" do
+    @db.conversion_procs[4] = p4 = proc{|s| s.to_i}
+    @db.conversion_procs[5] = p5 = proc{|s| s * 2}
+    @db.fetch = [[{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
     @db.register_row_type(:foo__bar)
     @db.sqls.must_equal ["SELECT pg_type.oid, typrelid, typarray FROM pg_type INNER JOIN pg_namespace ON ((pg_namespace.oid = pg_type.typnamespace) AND (pg_namespace.nspname = 'foo')) WHERE ((typtype = 'c') AND (typname = 'bar')) LIMIT 1",
       "SELECT attname, (CASE pg_type.typbasetype WHEN 0 THEN atttypid ELSE pg_type.typbasetype END) AS atttypid FROM pg_attribute INNER JOIN pg_type ON (pg_type.oid = pg_attribute.atttypid) WHERE ((attrelid = 2) AND (attnum > 0) AND NOT attisdropped) ORDER BY attnum"]
@@ -227,6 +230,15 @@ describe "pg_row extension" do
     @db.typecast_value(:pg_row_foo__bar, %w'1 b').must_equal(:bar=>'1', :baz=>'b')
     @db.typecast_value(:pg_row_foo__bar, :bar=>'1', :baz=>'b').must_equal(:bar=>'1', :baz=>'b')
     @db.literal(p1.call('(1,b)')).must_equal "ROW(1, 'bb')::foo.bar"
+  end
+
+  it "should not allow registering on a frozen database" do
+    @db.conversion_procs[4] = proc{|s| s.to_i}
+    @db.conversion_procs[5] = proc{|s| s * 2}
+    @db.fetch = [[], [{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
+    c = proc{|h| [h]}
+    @db.freeze
+    proc{@db.register_row_type(:foo, :converter=>c)}.must_raise RuntimeError, TypeError
   end
 
   it "should allow registering with a custom converter" do
@@ -254,15 +266,6 @@ describe "pg_row extension" do
     @db.typecast_value(:pg_row_foo, %w'1 b').must_equal(:bar=>1, :baz=>'bb')
     @db.typecast_value(:pg_row_foo, :bar=>'1', :baz=>'b').must_equal(:bar=>1, :baz=>'bb')
     @db.typecast_value(:pg_row_foo, 'bar'=>'1', 'baz'=>'b').must_equal(:bar=>1, :baz=>'bb')
-  end
-
-  it "should handle conversion procs that aren't added until later" do
-    @db.conversion_procs[5] = proc{|s| s * 2}
-    @db.fetch = [[{:oid=>1, :typrelid=>2, :typarray=>3}], [{:attname=>'bar', :atttypid=>4}, {:attname=>'baz', :atttypid=>5}]]
-    c = proc{|h| [h]}
-    @db.register_row_type(:foo, :converter=>c)
-    @db.conversion_procs[4] = proc{|s| s.to_i}
-    @db.conversion_procs[1].call('(1,b)').must_equal [{:bar=>1, :baz=>'bb'}]
   end
 
   it "should handle nil values when converting columns" do

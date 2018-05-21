@@ -26,16 +26,13 @@
 #                                     specified by the array of symbols.
 class Sequel::ConnectionPool
   OPTS = Sequel::OPTS
+  POOL_CLASS_MAP = {
+    :threaded => :ThreadedConnectionPool,
+    :single => :SingleConnectionPool,
+    :sharded_threaded => :ShardedThreadedConnectionPool,
+    :sharded_single => :ShardedSingleConnectionPool
+  }.freeze
 
-  # The default server to use
-  DEFAULT_SERVER = :default
-  
-  # A map of [single threaded, sharded] values to symbols or ConnectionPool subclasses.
-  CONNECTION_POOL_MAP = {[true, false] => :single, 
-    [true, true] => :sharded_single,
-    [false, false] => :threaded,
-    [false, true] => :sharded_threaded}
-  
   # Class methods used to return an appropriate pool subclass, separated
   # into a module for easier overridding by extensions.
   module ClassMethods
@@ -44,20 +41,33 @@ class Sequel::ConnectionPool
     # use a new instance of an appropriate pool subclass based on the
     # <tt>:single_threaded</tt> and <tt>:servers</tt> options.
     def get_pool(db, opts = OPTS)
-      case v = connection_pool_class(opts)
-      when Class
-        v.new(db, opts)
-      when Symbol
-        require("sequel/connection_pool/#{v}")
-        connection_pool_class(opts).new(db, opts) || raise(Sequel::Error, "No connection pool class found")
-      end
+      connection_pool_class(opts).new(db, opts)
     end
     
     private
     
     # Return a connection pool class based on the given options.
     def connection_pool_class(opts)
-      CONNECTION_POOL_MAP[opts[:pool_class]] || opts[:pool_class] || CONNECTION_POOL_MAP[[!!opts[:single_threaded], !!opts[:servers]]]
+      if pc = opts[:pool_class]
+        unless pc.is_a?(Class)
+          unless name = POOL_CLASS_MAP[pc]
+            raise Sequel::Error, "unsupported connection pool type, please pass appropriate class as the :pool_class option"
+          end
+
+          require_relative "connection_pool/#{pc}"
+          pc = Sequel.const_get(name)
+        end
+
+        pc
+      else
+        pc = if opts[:single_threaded]
+          opts[:servers] ? :sharded_single : :single
+        else
+          opts[:servers] ? :sharded_threaded : :threaded
+        end
+
+        connection_pool_class(:pool_class=>pc)
+      end
     end
   end
   extend ClassMethods
@@ -65,6 +75,9 @@ class Sequel::ConnectionPool
   # The after_connect proc used for this pool.  This is called with each new
   # connection made, and is usually used to set custom per-connection settings.
   attr_accessor :after_connect
+
+  # An array of sql strings to execute on each new connection.
+  attr_accessor :connect_sqls
 
   # The Sequel::Database object tied to this connection pool.
   attr_accessor :db
@@ -76,6 +89,7 @@ class Sequel::ConnectionPool
   # :after_connect :: A callable object called after each new connection is made, with the
   #                   connection object (and server argument if the callable accepts 2 arguments),
   #                   useful for customizations that you want to apply to all connections.
+  # :connect_sqls :: An array of sql strings to execute on each new connection, after :after_connect runs.
   # :preconnect :: Automatically create the maximum number of connections, so that they don't
   #                need to be created as needed.  This is useful when connecting takes a long time
   #                and you want to avoid possible latency during runtime.
@@ -84,30 +98,45 @@ class Sequel::ConnectionPool
   def initialize(db, opts=OPTS)
     @db = db
     @after_connect = opts[:after_connect]
-  end
-  
-  # Alias for +size+, not aliased directly for ease of subclass implementation
-  def created_count(*args)
-    size(*args)
+    @connect_sqls = opts[:connect_sqls]
+    @error_classes = db.send(:database_error_classes).dup.freeze
   end
   
   # An array of symbols for all shards/servers, which is a single <tt>:default</tt> by default.
   def servers
-    [DEFAULT_SERVER]
+    [:default]
   end
   
   private
+
+  # Remove the connection from the pool.  For threaded connections, this should be
+  # called without the mutex, because the disconnection may block.
+  def disconnect_connection(conn)
+    db.disconnect_connection(conn)
+  end
+
+  # Whether the given exception is a disconnect exception.
+  def disconnect_error?(exception)
+    exception.is_a?(Sequel::DatabaseDisconnectError) || db.send(:disconnect_error?, exception, OPTS)
+  end
   
   # Return a new connection by calling the connection proc with the given server name,
   # and checking for connection errors.
   def make_new(server)
     begin
       conn = @db.connect(server)
+
       if ac = @after_connect
         if ac.arity == 2
           ac.call(conn, server)
         else
           ac.call(conn)
+        end
+      end
+
+      if cs = @connect_sqls
+        cs.each do |sql|
+          db.send(:log_connection_execute, conn, sql)
         end
       end
     rescue Exception=>exception

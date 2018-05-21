@@ -39,11 +39,11 @@ module Sequel
     #   # Using integers to store the class type, with a :model_map hash
     #   # and an sti_key of :type
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>{1=>:Staff, 2=>:Manager}
+    #     model_map: {1=>:Staff, 2=>:Manager}
     #
     #   # Using non-class name strings
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>{'line staff'=>:Staff, 'supervisor'=>:Manager}
+    #     model_map: {'line staff'=>:Staff, 'supervisor'=>:Manager}
     #
     #   # By default the plugin sets the respective column value
     #   # when a new instance is created.
@@ -53,22 +53,22 @@ module Sequel
     #   # You can customize this behavior with the :key_chooser option.
     #   # This is most useful when using a non-bijective mapping.
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>{'line staff'=>:Staff, 'supervisor'=>:Manager},
-    #     :key_chooser=>proc{|instance| instance.model.sti_key_map[instance.model.to_s].first || 'stranger' }
+    #     model_map: {'line staff'=>:Staff, 'supervisor'=>:Manager},
+    #     key_chooser: lambda{|instance| instance.model.sti_key_map[instance.model.to_s].first || 'stranger'}
     #
     #   # Using custom procs, with :model_map taking column values
     #   # and yielding either a class, string, symbol, or nil, 
     #   # and :key_map taking a class object and returning the column
     #   # value to use
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>proc(&:reverse),
-    #     :key_map=>proc{|klass| klass.name.reverse}
+    #     model_map: :reverse.to_proc,
+    #     key_map: lambda{|klass| klass.name.reverse}
     #
     #   # You can use the same class for multiple values.
     #   # This is mainly useful when the sti_key column contains multiple values
     #   # which are different but do not require different code.
     #   Employee.plugin :single_table_inheritance, :type,
-    #     :model_map=>{'staff' => "Staff",
+    #     model_map: {'staff' => "Staff",
     #                  'manager' => "Manager",
     #                  'overpayed staff' => "Staff",
     #                  'underpayed staff' => "Staff"}
@@ -80,7 +80,7 @@ module Sequel
     module SingleTableInheritance
       # Setup the necessary STI variables, see the module RDoc for SingleTableInheritance
       def self.configure(model, key, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           @sti_key_array = nil
           @sti_key = key 
           @sti_dataset = dataset
@@ -95,7 +95,7 @@ module Sequel
                 end
               end
               km.each do |k,v|
-                h[k.to_s] = [ ] unless h.key?(k.to_s)
+                h[k.to_s] = [] unless h.key?(k.to_s)
                 h[k.to_s].push( *Array(v) )
               end
               h
@@ -111,7 +111,7 @@ module Sequel
               end
             end
             sti_model_map.each do |k,v|
-              h[v.to_s] = [ ] unless h.key?(v.to_s)
+              h[v.to_s] = [] unless h.key?(v.to_s)
               h[v.to_s] << k
             end
             h
@@ -119,7 +119,8 @@ module Sequel
             lambda{|klass| klass.name.to_s}
           end
           @sti_key_chooser = opts[:key_chooser] || lambda{|inst| Array(inst.model.sti_key_map[inst.model]).last }
-          dataset.row_proc = lambda{|r| model.sti_load(r)}
+
+          @dataset = @dataset.with_row_proc(model.method(:sti_load))
         end
       end
 
@@ -151,6 +152,17 @@ module Sequel
 
         Plugins.inherited_instance_variables(self, :@sti_dataset=>nil, :@sti_key=>nil, :@sti_key_map=>nil, :@sti_model_map=>nil, :@sti_key_chooser=>nil)
 
+        # Freeze STI information when freezing model class.  Note that
+        # because of how STI works, you should not freeze an STI subclass
+        # until after all subclasses of it have been created.
+        def freeze
+          @sti_key_array.freeze if @sti_key_array
+          @sti_key_map.freeze if @sti_key_map.is_a?(Hash)
+          @sti_model_map.freeze if @sti_model_map.is_a?(Hash)
+
+          super
+        end
+
         # Copy the necessary attributes to the subclasses, and filter the
         # subclass's dataset based on the sti_kep_map entry for the class.
         def inherited(subclass)
@@ -158,9 +170,9 @@ module Sequel
           key = Array(sti_key_map[subclass]).dup
           sti_subclass_added(key)
           rp = dataset.row_proc
-          subclass.set_dataset(sti_dataset.filter(SQL::QualifiedIdentifier.new(sti_dataset.first_source_alias, sti_key)=>key), :inherited=>true)
-          subclass.instance_eval do
-            dataset.row_proc = rp
+          subclass.set_dataset(sti_subclass_dataset(key), :inherited=>true)
+          subclass.instance_exec do
+            @dataset = @dataset.with_row_proc(rp)
             @sti_key_array = key
             self.simple_table = nil
           end
@@ -169,7 +181,12 @@ module Sequel
         # Return an instance of the class specified by sti_key,
         # used by the row_proc.
         def sti_load(r)
-          sti_class(sti_model_map[r[sti_key]]).call(r)
+          sti_class_from_sti_key(r[sti_key]).call(r)
+        end
+
+        # Return the sti class based on one of the keys from sti_model_map.
+        def sti_class_from_sti_key(key)
+          sti_class(sti_model_map[key])
         end
 
         # Make sure that all subclasses of the parent class correctly include 
@@ -184,10 +201,21 @@ module Sequel
 
         private
 
+        # Extend the sti dataset with the module when extending the main
+        # dataset.
+        def dataset_extend(mod, opts=OPTS)
+          @sti_dataset = @sti_dataset.with_extend(mod)
+          super
+        end
+
         # If calling set_dataset manually, make sure to set the dataset
         # row proc to one that handles inheritance correctly.
         def set_dataset_row_proc(ds)
-          ds.row_proc = @dataset.row_proc if @dataset
+          if @dataset
+            ds.with_row_proc(@dataset.row_proc)
+          else
+            super
+          end
         end
 
         # Return a class object.  If a class is given, return it directly.
@@ -206,13 +234,17 @@ module Sequel
             raise(Error, "Invalid class type used: #{v.inspect}")
           end
         end
+
+        # Use the given dataset for the subclass, with key being the allowed
+        # values for the sti_kind field.
+        def sti_subclass_dataset(key)
+          sti_dataset.where(SQL::QualifiedIdentifier.new(sti_dataset.first_source_alias, sti_key)=>Sequel.delay{Sequel.synchronize{key}})
+        end
       end
 
       module InstanceMethods
-        private
-
         # Set the sti_key column based on the sti_key_map.
-        def _before_validation
+        def before_validation
           if new? && model.sti_key && !self[model.sti_key]
             set_column_value("#{model.sti_key}=", model.sti_key_chooser.call(self))
           end

@@ -21,7 +21,7 @@ module Sequel
       # Modify the current model's dataset selection, if the model
       # has a dataset.
       def self.configure(model)
-        model.instance_eval do
+        model.instance_exec do
           self.dataset = dataset if @dataset && @dataset.opts[:select]
         end
       end
@@ -35,7 +35,7 @@ module Sequel
         # When reseting the instance dataset, also reset the instance_insert_dataset.
         def reset_instance_dataset
           ret = super
-          ds = @instance_dataset
+          return unless ds = @instance_dataset
 
           if columns = insert_returning_columns(ds)
             ds = ds.returning(*columns)

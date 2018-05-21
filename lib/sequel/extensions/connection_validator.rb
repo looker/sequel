@@ -60,9 +60,11 @@ module Sequel
 
     # Initialize the data structures used by this extension.
     def self.extended(pool)
-      pool.instance_eval do
-        @connection_timestamps ||= {}
-        @connection_validation_timeout = 3600
+      pool.instance_exec do
+        sync do
+          @connection_timestamps ||= {}
+          @connection_validation_timeout ||= 3600
+        end
       end
 
       # Make sure the valid connection SQL query is precached,
@@ -77,8 +79,14 @@ module Sequel
     # Record the time the connection was checked back into the pool.
     def checkin_connection(*)
       conn = super
-      @connection_timestamps[conn] = Time.now
+      @connection_timestamps[conn] = Sequel.start_timer
       conn
+    end
+
+    # Clean up timestamps during disconnect.
+    def disconnect_connection(conn)
+      sync{@connection_timestamps.delete(conn)}
+      super
     end
 
     # When acquiring a connection, if it has been
@@ -88,8 +96,8 @@ module Sequel
     def acquire(*a)
       begin
         if (conn = super) &&
-           (t = sync{@connection_timestamps.delete(conn)}) &&
-           Time.now - t > @connection_validation_timeout &&
+           (timer = sync{@connection_timestamps.delete(conn)}) &&
+           Sequel.elapsed_seconds_since(timer) > @connection_validation_timeout &&
            !db.valid_connection?(conn)
 
           if pool_type == :sharded_threaded
@@ -98,7 +106,7 @@ module Sequel
             sync{@allocated.delete(Thread.current)}
           end
 
-          db.disconnect_connection(conn)
+          disconnect_connection(conn)
           raise Retry
         end
       rescue Retry

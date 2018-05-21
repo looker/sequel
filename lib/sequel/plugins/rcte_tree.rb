@@ -12,26 +12,6 @@ module Sequel
     # level (where level 1 is children, level 2 is children and grandchildren
     # etc.) in a single query.
     #
-    # = Background
-    # 
-    # There are two types of common models for storing tree structured data
-    # in an SQL database, the adjacency list model and the nested set model.
-    # Before recursive common table expressions (or similar capabilities such
-    # as CONNECT BY for Oracle), the nested set model was the only easy way
-    # to retrieve all ancestors and descendants in a single query.  However,
-    # it has significant performance corner cases.
-    #
-    # On PostgreSQL 8.4, with a significant number of rows, the nested set
-    # model is almost 500 times slower than using a recursive common table
-    # expression with the adjacency list model to get all descendants, and
-    # almost 24,000 times slower to get all descendants to a given level.
-    #
-    # Considering that the nested set model requires more difficult management
-    # than the adjacency list model, it's almost always better to use the
-    # adjacency list model if your database supports common table expressions.
-    # See http://explainextended.com/2009/09/24/adjacency-list-vs-nested-sets-postgresql/
-    # for detailed analysis.
-    #
     # = Usage
     #
     # The rcte_tree plugin adds four associations to the model: parent, children, ancestors, and
@@ -56,12 +36,12 @@ module Sequel
     #   
     #   # Eager loading - also populates the :parent and children associations
     #   # for all ancestors and descendants
-    #   Model.filter(:id=>[1, 2]).eager(:ancestors, :descendants).all
+    #   Model.where(id: [1, 2]).eager(:ancestors, :descendants).all
     #   
-    #   # Eager loading children and grand children
-    #   Model.filter(:id=>[1, 2]).eager(:descendants=>2).all
-    #   # Eager loading children, grand children, and great grand children
-    #   Model.filter(:id=>[1, 2]).eager(:descendants=>3).all
+    #   # Eager loading children and grandchildren
+    #   Model.where(id: [1, 2]).eager(descendants: 2).all
+    #   # Eager loading children, grandchildren, and great grandchildren
+    #   Model.where(id: [1, 2]).eager(descendants: 3).all
     #
     # = Options
     #
@@ -76,8 +56,8 @@ module Sequel
     # Note that you can change the name of the above associations by specifying
     # a :name key in the appropriate hash of options above.  For example:
     #
-    #   Model.plugin :rcte_tree, :parent=>{:name=>:mother},
-    #    :children=>{:name=>:daughters}, :descendants=>{:name=>:offspring}
+    #   Model.plugin :rcte_tree, parent: {name: :mother},
+    #    children: {name: :daughters}, descendants: {name: :offspring}
     #
     # Any other keys in the main options hash are treated as options shared by
     # all of the associations.  Here's a few options that affect the plugin:
@@ -141,20 +121,20 @@ module Sequel
           extract_key_alias = lambda{|m| bd_conv[m.values.delete(ka)]}
         end
         
-        parent = opts.merge(opts.fetch(:parent, {})).fetch(:name, :parent)
-        childrena = opts.merge(opts.fetch(:children, {})).fetch(:name, :children)
+        parent = opts.merge(opts.fetch(:parent, OPTS)).fetch(:name, :parent)
+        childrena = opts.merge(opts.fetch(:children, OPTS)).fetch(:name, :children)
         
         opts[:reciprocal] = nil
-        a = opts.merge(opts.fetch(:ancestors, {}))
+        a = opts.merge(opts.fetch(:ancestors, OPTS))
         ancestors = a.fetch(:name, :ancestors)
         a[:read_only] = true unless a.has_key?(:read_only)
         a[:eager_loader_key] = key
         a[:dataset] ||= proc do
-          base_ds = model.filter(prkey_array.zip(key_array.map{|k| get_column_value(k)}))
+          base_ds = model.where(prkey_array.zip(key_array.map{|k| get_column_value(k)}))
           recursive_ds = model.join(t, key_array.zip(prkey_array))
           if c = a[:conditions]
-            (base_ds, recursive_ds) = [base_ds, recursive_ds].collect do |ds|
-              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.filter(*c) : ds.filter(c)
+            (base_ds, recursive_ds) = [base_ds, recursive_ds].map do |ds|
+              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.where(*c) : ds.where(c)
             end
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
@@ -196,13 +176,13 @@ module Sequel
             obj.associations[parent] = nil
           end
           r = model.association_reflection(ancestors)
-          base_case = model.filter(prkey=>id_map.keys).
+          base_case = model.where(prkey=>id_map.keys).
            select(*ancestor_base_case_columns)
           recursive_case = model.join(t, key_array.zip(prkey_array)).
            select(*recursive_case_columns)
           if c = r[:conditions]
-            (base_case, recursive_case) = [base_case, recursive_case].collect do |ds|
-              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.filter(*c) : ds.filter(c)
+            (base_case, recursive_case) = [base_case, recursive_case].map do |ds|
+              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.where(*c) : ds.where(c)
             end
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
@@ -240,16 +220,16 @@ module Sequel
         end
         model.one_to_many ancestors, a
         
-        d = opts.merge(opts.fetch(:descendants, {}))
+        d = opts.merge(opts.fetch(:descendants, OPTS))
         descendants = d.fetch(:name, :descendants)
         d[:read_only] = true unless d.has_key?(:read_only)
         la = d[:level_alias] ||= :x_level_x
         d[:dataset] ||= proc do
-          base_ds = model.filter(key_array.zip(prkey_array.map{|k| get_column_value(k)}))
+          base_ds = model.where(key_array.zip(prkey_array.map{|k| get_column_value(k)}))
           recursive_ds = model.join(t, prkey_array.zip(key_array))
           if c = d[:conditions]
-            (base_ds, recursive_ds) = [base_ds, recursive_ds].collect do |ds|
-              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.filter(*c) : ds.filter(c)
+            (base_ds, recursive_ds) = [base_ds, recursive_ds].map do |ds|
+              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.where(*c) : ds.where(c)
             end
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
@@ -294,21 +274,21 @@ module Sequel
             obj.associations[childrena] = []
           end
           r = model.association_reflection(descendants)
-          base_case = model.filter(key=>id_map.keys).
+          base_case = model.where(key=>id_map.keys).
            select(*descendant_base_case_columns)
           recursive_case = model.join(t, prkey_array.zip(key_array)).
            select(*recursive_case_columns)
           if c = r[:conditions]
-            (base_case, recursive_case) = [base_case, recursive_case].collect do |ds|
-              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.filter(*c) : ds.filter(c)
+            (base_case, recursive_case) = [base_case, recursive_case].map do |ds|
+              (c.is_a?(Array) && !Sequel.condition_specifier?(c)) ? ds.where(*c) : ds.where(c)
             end
           end
           if associations.is_a?(Integer)
             level = associations
             no_cache_level = level - 1
             associations = {}
-            base_case = base_case.select_more(SQL::AliasedExpression.new(Sequel.cast(0, Integer), la))
-            recursive_case = recursive_case.select_more(SQL::AliasedExpression.new(SQL::QualifiedIdentifier.new(t, la) + 1, la)).filter(SQL::QualifiedIdentifier.new(t, la) < level - 1)
+            base_case = base_case.select_append(SQL::AliasedExpression.new(Sequel.cast(0, Integer), la))
+            recursive_case = recursive_case.select_append(SQL::AliasedExpression.new(SQL::QualifiedIdentifier.new(t, la) + 1, la)).where(SQL::QualifiedIdentifier.new(t, la) < level - 1)
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
           ds = model.from(SQL::AliasedExpression.new(t, table_alias)).
@@ -316,7 +296,7 @@ module Sequel
               :args=>((key_aliases + col_aliases + (level ? [la] : [])) if col_aliases))
           ds = r.apply_eager_dataset_changes(ds)
           ds = ds.select_append(ka) unless ds.opts[:select] == nil
-          model.eager_load_results(r, eo.merge(:loader=>false, :initalize_rows=>false, :dataset=>ds, :id_map=>nil, :associations=>{})) do |obj|
+          model.eager_load_results(r, eo.merge(:loader=>false, :initalize_rows=>false, :dataset=>ds, :id_map=>nil, :associations=>OPTS)) do |obj|
             if level
               no_cache = no_cache_level == obj.values.delete(la)
             end

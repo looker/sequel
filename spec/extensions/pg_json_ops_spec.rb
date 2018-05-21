@@ -1,10 +1,11 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 Sequel.extension :pg_array, :pg_array_ops, :pg_json, :pg_json_ops
 
 describe "Sequel::Postgres::JSONOp" do
   before do
-    @db = Sequel.connect('mock://postgres', :quote_identifiers=>false)
+    @db = Sequel.connect('mock://postgres')
+    @db.extend_datasets{def quote_identifiers?; false end}
     @j = Sequel.pg_json_op(:j)
     @jb = Sequel.pg_jsonb_op(:j)
     @l = proc{|o| @db.literal(o)}
@@ -188,6 +189,19 @@ describe "Sequel::Postgres::JSONOp" do
 
   it "#concat should handle arrays" do
     @l[@jb.concat([1, 2])].must_equal "(j || '[1,2]'::jsonb)"
+  end
+
+  it "#insert should use the jsonb_insert function" do
+    @l[@jb.insert(:a, :h)].must_equal "jsonb_insert(j, a, h, false)"
+    @l[@jb.insert(:a, :h, true)].must_equal "jsonb_insert(j, a, h, true)"
+  end
+
+  it "#insert should handle hashes" do
+    @l[@jb.insert(:a, 'a'=>'b')].must_equal "jsonb_insert(j, a, '{\"a\":\"b\"}'::jsonb, false)"
+  end
+
+  it "#insert should handle arrays" do
+    @l[@jb.insert(%w'a b', [1, 2])].must_equal "jsonb_insert(j, ARRAY['a','b'], '[1,2]'::jsonb, false)"
   end
 
   it "#set should use the jsonb_set function" do

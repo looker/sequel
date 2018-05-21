@@ -7,15 +7,19 @@
 #
 # It allows creation of enum types using create_enum:
 #
-#   DB.create_enum(:type_name, %w'value1 value2 value3')
+#   DB.create_enum(:enum_type_name, %w'value1 value2 value3')
 #
 # You can also add values to existing enums via add_enum_value:
 #
 #   DB.add_enum_value(:enum_type_name, 'value4')
 #
+# If you want to rename an enum type, you can use rename_enum:
+#
+#   DB.rename_enum(:enum_type_name, :enum_type_another_name)
+#
 # If you want to drop an enum type, you can use drop_enum:
 #
-#   DB.drop_enum(:type_name)
+#   DB.drop_enum(:enum_type_name)
 #
 # Just like any user-created type, after creating the type, you
 # can create tables that have a column of that type:
@@ -44,7 +48,7 @@
 #
 #   Sequel.migration do
 #     change do
-#       create_enum(:type_name, %w'value1 value2 value3')
+#       create_enum(:enum_type_name, %w'value1 value2 value3')
 #     end
 #   end
 #
@@ -63,7 +67,10 @@ module Sequel
       # Parse the available enum values when loading this extension into
       # your database.
       def self.extended(db)
-        db.send(:parse_enum_labels)
+        db.instance_exec do
+          @enum_labels = {}
+          parse_enum_labels
+        end
       end
 
       # Run the SQL to add the given value to the existing enum type.
@@ -92,6 +99,15 @@ module Sequel
         nil
       end
 
+      # Run the SQL to rename the enum type with the given name
+      # to the another given name.
+      def rename_enum(enum, new_name)
+        sql = "ALTER TYPE #{quote_schema_table(enum)} RENAME TO #{quote_schema_table(new_name)}"
+        run sql
+        parse_enum_labels
+        nil
+      end
+
       # Run the SQL to drop the enum type with the given name.
       # Options:
       # :if_exists :: Do not raise an error if the enum type does not exist
@@ -109,14 +125,15 @@ module Sequel
       # the pg_type table to get names and array oids for
       # enums.
       def parse_enum_labels
-        @enum_labels = metadata_dataset.from(:pg_enum).
+        enum_labels = metadata_dataset.from(:pg_enum).
           order(:enumtypid, :enumsortorder).
-          select_hash_groups(Sequel.cast(:enumtypid, Integer).as(:v), :enumlabel)
+          select_hash_groups(Sequel.cast(:enumtypid, Integer).as(:v), :enumlabel).freeze
+        enum_labels.each_value(&:freeze)
 
         if respond_to?(:register_array_type)
           array_types = metadata_dataset.
             from(:pg_type).
-            where(:oid=>@enum_labels.keys).
+            where(:oid=>enum_labels.keys).
             exclude(:typarray=>0).
             select_map([:typname, Sequel.cast(:typarray, Integer).as(:v)])
 
@@ -126,13 +143,16 @@ module Sequel
             register_array_type(name, :oid=>oid)
           end
         end
+
+        Sequel.synchronize{@enum_labels.replace(enum_labels)}
       end
 
       # For schema entries that are enums, set the type to
       # :enum and add a :enum_values entry with the enum values.
-      def schema_parse_table(*)
+      def schema_post_process(_)
         super.each do |_, s|
-          if values = @enum_labels[s[:oid]]
+          oid = s[:oid]
+          if values = Sequel.synchronize{@enum_labels[oid]}
             s[:type] = :enum
             s[:enum_values] = values
           end
@@ -152,6 +172,10 @@ module Sequel
       private
       def create_enum(name, _)
         @actions << [:drop_enum, name]
+      end
+
+      def rename_enum(old_name, new_name)
+        @actions << [:rename_enum, new_name, old_name]
       end
     end
   end
