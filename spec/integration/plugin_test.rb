@@ -2014,17 +2014,20 @@ describe "Sequel::Plugins::ConstraintValidations" do
       includes %w'abc def', :inc, opts.merge(:name=>:i)
       unique :uniq, opts.merge(:name=>:u)
       max_length 6, :minlen, opts.merge(:name=>:maxl2)
+      operator :<, 'm', :exactlen, opts.merge(:name=>:lt)
+      operator :>=, 5, :num, opts.merge(:name=>:gte)
     end
-    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u'}
+    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u', :num=>5}
     @violations = [
       [:pre, [nil, '', ' ']],
-      [:exactlen, [nil, '', '1234', '123456']],
+      [:exactlen, [nil, '', '1234', '123456', 'n1234']],
       [:minlen, [nil, '', '1234']],
       [:maxlen, [nil, '123456']],
       [:lenrange, [nil, '', '12', '123456']],
       [:lik, [nil, '', 'fo', 'fotabc', 'FOOABC']],
       [:ilik, [nil, '', 'fo', 'fotabc']],
       [:inc, [nil, '', 'ab', 'abcd']],
+      [:num, [nil, 3, 4]],
     ]
 
     if @regexp
@@ -2101,6 +2104,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
           String :ilik
           String :inc
           String :uniq, :null=>false
+          Integer :num
           validate(&validate_block)
         end
       end
@@ -2146,6 +2150,7 @@ describe "Sequel::Plugins::ConstraintValidations" do
           if regexp
             add_column :form, String
           end
+          add_column :num, Integer
           validate(&validate_block)
         end
       end
@@ -2258,5 +2263,35 @@ describe "date_arithmetic extension" do
     @check.call(:date_sub, @dt, @h0, @dt)
     @check.call(:date_sub, @dt, @h1, @s1)
     @check.call(:date_sub, @dt, @h2, @s2)
+  end
+end
+
+describe "string_agg extension" do
+  before(:all) do
+    @db = DB
+    @db.extension(:string_agg)
+    @db.create_table!(:string_agg_test) do
+      Integer :id
+      String :s
+      Integer :o
+    end
+    @db[:string_agg_test].import([:id, :s, :o], [[1, 'a', 3], [1, 'a', 3], [1, 'b', 5], [1, 'c', 4], [2, 'aa', 2], [2, 'bb', 1]])
+    @ds = @db[:string_agg_test].select_group(:id).order(:id)
+  end
+  after(:all) do
+    @db.drop_table?(:string_agg_test)
+  end
+
+  cspecify "should have string_agg return aggregated concatenation", :mssql, :sqlite, :derby do
+    h = @ds.select_append(Sequel.string_agg(:s).as(:v)).to_hash(:id, :v)
+    h[1].must_match(/\A[abc],[abc],[abc],[abc]\z/)
+    h[2].must_match(/\A(aa|bb),(aa|bb)\z/)
+
+    @ds.select_append(Sequel.string_agg(:s).order(:o).as(:v)).map([:id, :v]).must_equal [[1, 'a,a,c,b'], [2, 'bb,aa']]
+    @ds.select_append(Sequel.string_agg(:s, '-').order(:o).as(:v)).map([:id, :v]).must_equal [[1, 'a-a-c-b'], [2, 'bb-aa']]
+  end
+
+  cspecify "should have string_agg return aggregated concatenation for distinct values", :mssql, :sqlite, :oracle, :db2, :derby do
+    @ds.select_group(:id).select_append(Sequel.string_agg(:s).order(:s).distinct.as(:v)).map([:id, :v]).must_equal [[1, 'a,b,c'], [2, 'aa,bb']]
   end
 end

@@ -611,3 +611,27 @@ or:
 This usage is discouraged in new code, but will continue to be supported indefinitely.
 It is not recommended to convert old-style migration classes to the <tt>Sequel.migration</tt>
 DSL, but it is recommended to use the <tt>Sequel.migration</tt> DSL for all new migrations.
+
+== Database-specific migrations
+
+While not a recommended practice, it is sometimes necessary to have parts of migrations be
+database-specific .  You can use the Sequel::Database#database_type method to check which
+database the migration is being run on, and operate accordingly:
+
+  Sequel.migration do
+    up do
+      if database_type == :mysql
+        run 'MySQL specific code'
+      else
+        run 'Generic SQL code'
+      end
+    end
+  
+    down do
+      if database_type == :mysql
+        run 'MySQL specific code'
+      else
+        run 'Generic SQL code'
+      end
+    end
+  end
