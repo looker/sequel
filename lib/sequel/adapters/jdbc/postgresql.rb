@@ -151,17 +151,6 @@ module Sequel
 
         private
         
-        # SEQUEL5: Remove
-        def conversion_procs_updated
-          super
-          Sequel.synchronize{@oid_convertor_map = {}}
-        end
-
-        DATABASE_ERROR_CLASSES = [NativeException].freeze
-        def database_error_classes
-          DATABASE_ERROR_CLASSES
-        end
-
         def disconnect_error?(exception, opts)
           super || exception.message =~ /\A(This connection has been closed\.|FATAL: terminating connection due to administrator command|An I\/O error occurred while sending to the backend\.)\z/
         end
