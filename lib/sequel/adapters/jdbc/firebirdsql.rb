@@ -9,10 +9,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:firebirdsql] = proc do |db|
-        db.extend(Sequel::JDBC::Firebird::DatabaseMethods)
-        db.extend_datasets Sequel::Firebird::DatasetMethods
-        org.firebirdsql.jdbc.FBDriver
+      unless DATABASE_SETUP[:firebirdsql]
+        DATABASE_SETUP[:firebirdsql] = proc do |db|
+          db.extend(Sequel::JDBC::Firebird::DatabaseMethods)
+          db.extend_datasets Sequel::Firebird::DatasetMethods
+          org.firebirdsql.jdbc.FBDriver
+        end
       end
     end
 

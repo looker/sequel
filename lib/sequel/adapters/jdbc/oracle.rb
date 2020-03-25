@@ -7,10 +7,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:oracle] = proc do |db|
-        db.extend(Sequel::JDBC::Oracle::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::Oracle::Dataset
-        Java::oracle.jdbc.driver.OracleDriver
+      unless DATABASE_SETUP[:oracle]
+        DATABASE_SETUP[:oracle] = proc do |db|
+          db.extend(Sequel::JDBC::Oracle::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::Oracle::Dataset
+          Java::oracle.jdbc.driver.OracleDriver
+        end
       end
     end
 

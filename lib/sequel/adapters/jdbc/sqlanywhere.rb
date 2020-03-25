@@ -21,10 +21,12 @@ module Sequel
     raise(Sequel::AdapterNotFound, "no suitable SQLAnywhere JDBC driver found") unless drv
 
     Sequel.synchronize do
-      DATABASE_SETUP[:sqlanywhere] = proc do |db|
-        db.extend(Sequel::JDBC::SqlAnywhere::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::SqlAnywhere::Dataset
-        drv
+      unless DATABASE_SETUP[:sqlanywhere]
+        DATABASE_SETUP[:sqlanywhere] = proc do |db|
+          db.extend(Sequel::JDBC::SqlAnywhere::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::SqlAnywhere::Dataset
+          drv
+        end
       end
     end
 

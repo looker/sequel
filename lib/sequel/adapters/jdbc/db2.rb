@@ -7,31 +7,33 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:db2] = proc do |db|
-        (class << db; self; end).class_eval do
-          alias jdbc_schema_parse_table schema_parse_table
-          alias jdbc_tables tables
-          alias jdbc_views views
-          alias jdbc_indexes indexes
-        end
-        db.extend(Sequel::JDBC::DB2::DatabaseMethods)
-        (class << db; self; end).class_eval do
-          alias schema_parse_table jdbc_schema_parse_table
-          alias tables jdbc_tables
-          alias views jdbc_views
-          alias indexes jdbc_indexes
-          %w'schema_parse_table tables views indexes'.each do |s|
-            class_eval(<<-END, __FILE__, __LINE__+1)
-              def jdbc_#{s}(*a)
-                Sequel::Deprecation.deprecate("Database#jdbc_#{s} in the jdbc/db2 adapter", "Use Database\##{s} instead")
-                #{s}(*a)
-              end
-            END
-            # remove_method(:"jdbc_#{s}") # SEQUEL5
+      unless DATABASE_SETUP[:db2]
+        DATABASE_SETUP[:db2] = proc do |db|
+          (class << db; self; end).class_eval do
+            alias jdbc_schema_parse_table schema_parse_table
+            alias jdbc_tables tables
+            alias jdbc_views views
+            alias jdbc_indexes indexes
           end
+          db.extend(Sequel::JDBC::DB2::DatabaseMethods)
+          (class << db; self; end).class_eval do
+            alias schema_parse_table jdbc_schema_parse_table
+            alias tables jdbc_tables
+            alias views jdbc_views
+            alias indexes jdbc_indexes
+            %w'schema_parse_table tables views indexes'.each do |s|
+              class_eval(<<-END, __FILE__, __LINE__+1)
+                def jdbc_#{s}(*a)
+                  Sequel::Deprecation.deprecate("Database#jdbc_#{s} in the jdbc/db2 adapter", "Use Database\##{s} instead")
+                  #{s}(*a)
+                end
+              END
+              # remove_method(:"jdbc_#{s}") # SEQUEL5
+            end
+          end
+          db.dataset_class = Sequel::JDBC::DB2::Dataset
+          com.ibm.db2.jcc.DB2Driver
         end
-        db.dataset_class = Sequel::JDBC::DB2::Dataset
-        com.ibm.db2.jcc.DB2Driver
       end
     end
 

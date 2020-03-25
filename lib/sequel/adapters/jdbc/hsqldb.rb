@@ -6,10 +6,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:hsqldb] = proc do |db|
-        db.extend(Sequel::JDBC::HSQLDB::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::HSQLDB::Dataset
-        org.hsqldb.jdbcDriver
+      unless DATABASE_SETUP[:hsqldb]
+        DATABASE_SETUP[:hsqldb] = proc do |db|
+          db.extend(Sequel::JDBC::HSQLDB::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::HSQLDB::Dataset
+          org.hsqldb.jdbcDriver
+        end
       end
     end
 

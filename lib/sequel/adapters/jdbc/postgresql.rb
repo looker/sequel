@@ -6,10 +6,12 @@ Sequel.require 'adapters/shared/postgres'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:postgresql] = proc do |db|
-        db.dataset_class = Sequel::JDBC::Postgres::Dataset
-        db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
-        org.postgresql.Driver
+      unless DATABASE_SETUP[:postgresql]
+        DATABASE_SETUP[:postgresql] = proc do |db|
+          db.dataset_class = Sequel::JDBC::Postgres::Dataset
+          db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
+          org.postgresql.Driver
+        end
       end
     end
 

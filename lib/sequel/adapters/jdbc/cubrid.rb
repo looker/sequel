@@ -9,10 +9,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:cubrid] = proc do |db|
-        db.extend(Sequel::JDBC::Cubrid::DatabaseMethods)
-        db.extend_datasets Sequel::Cubrid::DatasetMethods
-        Java::cubrid.jdbc.driver.CUBRIDDriver
+      unless DATABASE_SETUP[:cubrid]
+        DATABASE_SETUP[:cubrid] = proc do |db|
+          db.extend(Sequel::JDBC::Cubrid::DatabaseMethods)
+          db.extend_datasets Sequel::Cubrid::DatasetMethods
+          Java::cubrid.jdbc.driver.CUBRIDDriver
+        end
       end
     end
 

@@ -6,11 +6,13 @@ Sequel.require 'adapters/shared/sqlite'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:sqlite] = proc do |db|
-        db.extend(Sequel::JDBC::SQLite::DatabaseMethods)
-        db.extend_datasets Sequel::SQLite::DatasetMethods
-        db.set_integer_booleans
-        org.sqlite.JDBC
+      unless DATABASE_SETUP[:sqlite]
+        DATABASE_SETUP[:sqlite] = proc do |db|
+          db.extend(Sequel::JDBC::SQLite::DatabaseMethods)
+          db.extend_datasets Sequel::SQLite::DatasetMethods
+          db.set_integer_booleans
+          org.sqlite.JDBC
+        end
       end
     end
 

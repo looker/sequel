@@ -5,10 +5,12 @@ Sequel::JDBC.load_driver('org.h2.Driver', :H2)
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:h2] = proc do |db|
-        db.extend(Sequel::JDBC::H2::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::H2::Dataset
-        org.h2.Driver
+      unless DATABASE_SETUP[:h2]
+        DATABASE_SETUP[:h2] = proc do |db|
+          db.extend(Sequel::JDBC::H2::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::H2::Dataset
+          org.h2.Driver
+        end
       end
     end
 

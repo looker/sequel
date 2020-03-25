@@ -9,10 +9,12 @@ Sequel.require 'adapters/utils/emulate_offset_with_row_number'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:as400] = proc do |db|
-        db.extend(Sequel::JDBC::AS400::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::AS400::Dataset
-        com.ibm.as400.access.AS400JDBCDriver
+      unless DATABASE_SETUP[:as400]
+        DATABASE_SETUP[:as400] = proc do |db|
+          db.extend(Sequel::JDBC::AS400::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::AS400::Dataset
+          com.ibm.as400.access.AS400JDBCDriver
+        end
       end
     end
 

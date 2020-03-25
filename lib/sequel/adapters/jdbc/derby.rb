@@ -6,10 +6,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:derby] = proc do |db|
-        db.extend(Sequel::JDBC::Derby::DatabaseMethods)
-        db.dataset_class = Sequel::JDBC::Derby::Dataset
-        org.apache.derby.jdbc.EmbeddedDriver
+      unless DATABASE_SETUP[:derby]
+        DATABASE_SETUP[:derby] = proc do |db|
+          db.extend(Sequel::JDBC::Derby::DatabaseMethods)
+          db.dataset_class = Sequel::JDBC::Derby::Dataset
+          org.apache.derby.jdbc.EmbeddedDriver
+        end
       end
     end
 

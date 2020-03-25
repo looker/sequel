@@ -8,10 +8,12 @@ Sequel.require 'adapters/shared/informix'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:"informix-sqli"] = proc do |db|
-        db.extend(Sequel::JDBC::Informix::DatabaseMethods)
-        db.extend_datasets Sequel::Informix::DatasetMethods
-        com.informix.jdbc.IfxDriver
+      unless DATABASE_SETUP[:"informix-sqli"]
+        DATABASE_SETUP[:"informix-sqli"] = proc do |db|
+          db.extend(Sequel::JDBC::Informix::DatabaseMethods)
+          db.extend_datasets Sequel::Informix::DatasetMethods
+          com.informix.jdbc.IfxDriver
+        end
       end
     end
 

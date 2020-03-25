@@ -6,10 +6,12 @@ Sequel.require 'adapters/shared/mysql'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:mysql] = proc do |db|
-        db.extend(Sequel::JDBC::MySQL::DatabaseMethods)
-        db.extend_datasets Sequel::MySQL::DatasetMethods
-        com.mysql.jdbc.Driver
+      unless DATABASE_SETUP[:mysql]
+        DATABASE_SETUP[:mysql] = proc do |db|
+          db.extend(Sequel::JDBC::MySQL::DatabaseMethods)
+          db.extend_datasets Sequel::MySQL::DatasetMethods
+          com.mysql.jdbc.Driver
+        end
       end
     end
 

@@ -9,10 +9,12 @@ Sequel.require 'adapters/jdbc/transactions'
 module Sequel
   module JDBC
     Sequel.synchronize do
-      DATABASE_SETUP[:jdbcprogress] = proc do |db|
-        db.extend(Sequel::JDBC::Progress::DatabaseMethods)
-        db.extend_datasets Sequel::Progress::DatasetMethods
-        com.progress.sql.jdbc.JdbcProgressDriver
+      unless DATABASE_SETUP[:jdbcprogress]
+        DATABASE_SETUP[:jdbcprogress] = proc do |db|
+          db.extend(Sequel::JDBC::Progress::DatabaseMethods)
+          db.extend_datasets Sequel::Progress::DatasetMethods
+          com.progress.sql.jdbc.JdbcProgressDriver
+        end
       end
     end
 
