@@ -136,7 +136,10 @@ module Sequel
 
         NUMERIC_TYPE = Java::JavaSQL::Types::NUMERIC
         TIMESTAMP_TYPE = Java::JavaSQL::Types::TIMESTAMP
-        TIMESTAMPTZ_TYPES = [Java::oracle.jdbc.OracleTypes::TIMESTAMPTZ, Java::oracle.jdbc.OracleTypes::TIMESTAMPLTZ]#.freeze # SEQUEL5
+        # These Oracle constants don't resolve with newer driver versions, so hardcode them
+        # from https://docs.oracle.com/cd/E11882_01/appdev.112/e13995/constant-values.html
+        # TIMESTAMPTZ_TYPES = [Java::oracle.jdbc.OracleTypes::TIMESTAMPTZ, Java::oracle.jdbc.OracleTypes::TIMESTAMPLTZ]#.freeze # SEQUEL5
+        TIMESTAMPTZ_TYPES = [-101, -102]#.freeze
 
         def type_convertor(map, meta, type, i)
           case type
